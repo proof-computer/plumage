@@ -1,0 +1,16 @@
+[package]
+name = "plumage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT OR Apache-2.0"
+description = "A pointless swarm that must agree on a colour each day, and paints its own website with the result"
+repository = "https://github.com/proof-computer/plumage"
+publish = false
+
+[[bin]]
+name = "plumage"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
