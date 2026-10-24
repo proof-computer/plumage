@@ -28,9 +28,12 @@ the Acurast network. It runs on the Liskov platform on Acurast phones with a
 
 ## Status
 
-Scaffold only. Nothing runs. The direction is decided (orchestrator ADR-0258);
-the closing rule's formula, the source allowlist, the per-peer fetch budget,
-and whether the answer is one colour or a small palette are being shaped.
+The closed vocabulary of 24 colours and the stable-majority closing rule are
+implemented and tested as pure code: the first colour held by more than half
+of the live voters for a continuous hour decides the day; otherwise it remains
+undecided. The binary still prints its version and exits. The peer and site
+come later; the source allowlist and per-peer fetch budget are being shaped
+(orchestrator ADR-0258).
 
 ## Rules the swarm keeps
 
