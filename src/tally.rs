@@ -2,11 +2,11 @@
 //!
 //! Each count is a pure function. The formula beside it is the published rule.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::closing::Vote;
 use crate::colour::Colour;
-use crate::evidence::Evidence;
+use crate::evidence::{Evidence, EvidenceId};
 
 /// One UTC hour, in milliseconds. The curve samples on this grid.
 const HOUR_MS: u64 = 3_600_000;
@@ -18,6 +18,12 @@ pub const VOTE_CHANGES_RULE: &str = "A vote change is a vote whose colour differ
 pub const CURVE_RULE: &str = "The curve is the colour counts at every whole hour from one hour after the day's open through the day's close.";
 pub const FETCHES_RULE: &str =
     "An author's fetch count is the number of evidence records that author stored.";
+pub const VOTES_CAST_RULE: &str =
+    "Votes cast is the number of vote records from the day's open through the time.";
+pub const ARGUMENTS_RULE: &str = "An argument count is the number of argue records an author wrote; the day's total is their sum.";
+pub const TRAIL_RULE: &str = "An author's trail is that author's votes in the order the closing rule replays them, oldest first.";
+pub const CITATIONS_RULE: &str = "A fact's citation count is the number of arguments that cite it; an argument citing it twice counts once.";
+pub const DAYS_PER_COLOUR_RULE: &str = "A colour's day count is the number of closed days whose decision named it. Undecided days are counted apart.";
 
 /// Each author's current colour at `at_ms`.
 ///
@@ -91,6 +97,67 @@ pub fn fetches(evidence: &[Evidence]) -> BTreeMap<String, usize> {
         *counts.entry(record.author().to_owned()).or_default() += 1;
     }
     counts
+}
+
+/// Vote records from `open_ms` through `at_ms`, both ends included.
+pub fn votes_cast(votes: &[Vote], open_ms: u64, at_ms: u64) -> usize {
+    votes
+        .iter()
+        .filter(|vote| open_ms <= vote.at_ms && vote.at_ms <= at_ms)
+        .count()
+}
+
+/// Each author's votes in the order [`crate::closing::decide`] replays them.
+///
+/// Authors who cast no vote are absent.
+pub fn trails(votes: &[Vote]) -> BTreeMap<String, Vec<(u64, Colour)>> {
+    let mut ordered: Vec<&Vote> = votes.iter().collect();
+    ordered.sort_by_key(|vote| (vote.at_ms, vote.author.as_str(), vote.colour));
+    let mut trails: BTreeMap<String, Vec<(u64, Colour)>> = BTreeMap::new();
+    for vote in ordered {
+        trails
+            .entry(vote.author.clone())
+            .or_default()
+            .push((vote.at_ms, vote.colour));
+    }
+    trails
+}
+
+/// Arguments citing each evidence id. An id cited twice by one argument counts once.
+///
+/// An id no argument cites is absent. The key is the id's string.
+pub fn citations<'a, A, C>(arguments: A) -> BTreeMap<String, usize>
+where
+    A: IntoIterator<Item = C>,
+    C: IntoIterator<Item = &'a EvidenceId>,
+{
+    let mut counts = BTreeMap::new();
+    for argument in arguments {
+        let mut seen = BTreeSet::new();
+        for id in argument {
+            if seen.insert(id.0.as_str()) {
+                *counts.entry(id.0.clone()).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Closed days per colour, and the number of undecided days.
+///
+/// `None` is an undecided day. A colour no decision named is absent.
+pub fn days_per_colour(
+    decisions: impl IntoIterator<Item = Option<Colour>>,
+) -> (BTreeMap<Colour, usize>, usize) {
+    let mut days = BTreeMap::new();
+    let mut undecided = 0;
+    for decision in decisions {
+        match decision {
+            Some(colour) => *days.entry(colour).or_default() += 1,
+            None => undecided += 1,
+        }
+    }
+    (days, undecided)
 }
 
 #[cfg(test)]
@@ -176,5 +243,58 @@ mod tests {
             BTreeMap::from([("ada".to_owned(), 2), ("bea".to_owned(), 1)])
         );
         assert!(fetches(&[]).is_empty());
+    }
+
+    #[test]
+    fn votes_cast_counts_only_the_closed_window() {
+        let votes = [
+            vote("ada", Red, 0),
+            vote("bea", Blue, 5),
+            vote("cy", Red, 10),
+        ];
+        assert_eq!(votes_cast(&votes, 0, 10), 3);
+        assert_eq!(votes_cast(&votes, 5, 5), 1);
+        assert_eq!(votes_cast(&votes, 6, 9), 0);
+        assert_eq!(votes_cast(&votes, 11, 10), 0);
+    }
+
+    #[test]
+    fn trails_order_same_time_votes_as_decide_does() {
+        let tied = [
+            vote("ada", Blue, 5),
+            vote("ada", Red, 5),
+            vote("bea", Red, 5),
+        ];
+        assert_eq!(
+            trails(&tied).get("ada").map(Vec::as_slice),
+            Some([(5, Red), (5, Blue)].as_slice())
+        );
+        assert_eq!(
+            current_votes(&tied, 5).get("ada"),
+            trails(&tied)
+                .get("ada")
+                .and_then(|trail| trail.last())
+                .map(|(_, colour)| colour)
+        );
+    }
+
+    #[test]
+    fn citations_count_an_argument_once_per_fact() {
+        let cited = EvidenceId("cited".to_owned());
+        let other = EvidenceId("other".to_owned());
+        let arguments = [vec![&cited, &cited, &other], vec![&cited], vec![]];
+        assert_eq!(
+            citations(arguments),
+            BTreeMap::from([("cited".to_owned(), 2), ("other".to_owned(), 1)])
+        );
+        assert!(citations(Vec::<Vec<&EvidenceId>>::new()).is_empty());
+    }
+
+    #[test]
+    fn days_per_colour_counts_decided_days_and_undecided_apart() {
+        assert_eq!(
+            days_per_colour([Some(Blue), None, Some(Blue), Some(Red)]),
+            (BTreeMap::from([(Blue, 2), (Red, 1)]), 1)
+        );
     }
 }
