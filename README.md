@@ -31,9 +31,14 @@ the Acurast network. It runs on the Liskov platform on Acurast phones with a
 The closed vocabulary of 24 colours and the stable-majority closing rule are
 implemented and tested as pure code: the first colour held by more than half
 of the live voters for a continuous hour decides the day; otherwise it remains
-undecided. The binary still prints its version and exits. The peer and site
-come later; the source allowlist and per-peer fetch budget are being shaped
-(orchestrator ADR-0258).
+undecided. The three actions (`fetch`, `argue`, `vote`) have a closed JSON
+schema and validation. Fetch intents permit only the Wikimedia on-this-day
+feed and London's sunrise/sunset JSON API, with three fetches per activation.
+Evidence retains a SHA-256 digest and at most 600 characters; arguments are
+limited to 400 characters and eight citations fetched by their author in the
+same run. Peer-id SHA-256 hashes seed the initial event offset. These types
+perform no network requests. The binary still prints its version and exits;
+the peer and site come later (orchestrator ADR-0258).
 
 ## Rules the swarm keeps
 
