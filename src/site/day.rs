@@ -1,40 +1,49 @@
-//! One closed day's page.
+//! One day's page: the decision, the stacked hourly curve, and the thread.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use crate::closing::{Decision, LIVE_RULE, RULE};
+use crate::closing::{Decision, HOLD_MS, LIVE_RULE, RULE, holds, live_voters};
 use crate::colour::Colour;
-use crate::tally::{CURVE_RULE, curve};
-
-use super::layout::{
-    card, document, push_arguments, push_changes, push_current, push_fetches, push_live,
+use crate::day::Day;
+use crate::evidence::Evidence;
+use crate::tally::{
+    ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations,
+    current_votes, curve, fetches, trails, vote_changes, votes_cast,
 };
+
+use super::layout::{chip, document, peer, push_escaped};
 use super::{DayPage, Section};
 
-/// A closed day's archive page, painted by `chrome.painted_by`.
+const HATCH: &str = "repeating-linear-gradient(45deg,#E4E3DE 0 6px,#F3F2EE 6px 12px)";
+
+/// A day's page at depth 1, painted by `chrome.painted_by`.
+///
+/// `decision: None` is the live day. A `Some` decision is that day after close.
 pub fn render_day(page: &DayPage<'_>) -> String {
+    let live = live_voters(page.votes, page.day.open_ms(), page.day.close_ms());
+    let open = page.decision.is_none();
+    let (headline, prose, rule_heading) = decision_copy(page, live.len());
     let mut body = String::new();
-    body.push_str("<h1>");
-    body.push_str(&page.day.to_string());
-    body.push_str("</h1>\n");
-    if let Some(decision) = page.decision {
-        body.push_str("<p>");
-        body.push_str(&decision_line(decision));
-        body.push_str("</p>\n");
-    }
-    body.push_str("<p>");
-    body.push_str(RULE);
-    body.push_str("</p>\n<p>");
-    body.push_str(LIVE_RULE);
+    push_nav(&mut body, page);
+    body.push_str("<p class=\"mono\">");
+    push_escaped(&mut body, &status_line(page.day, open));
+    body.push_str("</p>\n<h1 style=\"font-size:132px;line-height:0.9;letter-spacing:-0.045em\">");
+    push_escaped(&mut body, &headline);
+    body.push_str("</h1>\n<p>");
+    push_escaped(&mut body, &prose);
     body.push_str("</p>\n");
-    push_current(&mut body, page);
-    push_live(&mut body, page);
-    push_changes(&mut body, page.votes, &page.chrome);
-    push_fetches(&mut body, page.evidence, &page.chrome);
-    push_curve(&mut body, page);
-    push_arguments(&mut body, page.arguments, &page.chrome);
+    let mut rules = String::from("<p class=\"mono\">");
+    rules.push_str(RULE);
+    rules.push_str("</p>\n<p class=\"mono\">");
+    rules.push_str(LIVE_RULE);
+    rules.push_str("</p>\n");
+    body.push_str(&super::layout::card(&rule_heading, &rules));
+    push_curve(&mut body, page, live.len());
+    push_numbers(&mut body, page, live.len());
+    push_thread(&mut body, page, &live);
+    push_facts(&mut body, page);
     document(
-        &page.day.to_string(),
+        &long_date(page.day),
         Some(Section::Days),
         1,
         &page.chrome,
@@ -42,43 +51,104 @@ pub fn render_day(page: &DayPage<'_>) -> String {
     )
 }
 
-fn decision_line(decision: Decision) -> String {
-    match decision {
-        Decision::Decided {
+fn decision_copy(page: &DayPage<'_>, live: usize) -> (String, String, String) {
+    let painted = prose_date(page.day.next());
+    match page.decision {
+        Some(Decision::Decided {
             colour,
             held_from_ms,
             held_to_ms,
-        } => format!(
-            "Decided: {}, held {}{}{} UTC",
-            colour.name(),
-            hhmm(held_from_ms),
-            '\u{2013}',
-            hhmm(held_to_ms)
+        }) => (
+            format!("{}.", capitalise(colour.name())),
+            format!(
+                "Decided: {}, held by more than half of the {live} live voters from {} to {} UTC. It painted {painted}.",
+                colour.name(),
+                hhmm(held_from_ms),
+                hhmm(held_to_ms)
+            ),
+            "The rule that decided it".to_owned(),
         ),
-        Decision::Undecided => "Undecided".to_owned(),
+        Some(Decision::Undecided) => (
+            "Undecided.".to_owned(),
+            format!(
+                "No colour held more than half of the live voters for a continuous hour before 23:00 UTC. {painted} was left unpainted."
+            ),
+            "The rule that decided it".to_owned(),
+        ),
+        None => (
+            "Open.".to_owned(),
+            "The question is open until 23:00 UTC.".to_owned(),
+            "The rule that will decide it".to_owned(),
+        ),
     }
 }
 
-fn push_curve(out: &mut String, page: &DayPage<'_>) {
-    let points = curve(page.votes, page.day.open_ms(), page.day.close_ms());
-    let mut body = String::from("<p>");
-    body.push_str(CURVE_RULE);
-    body.push_str("</p>\n");
-    body.push_str(&step_svg(&points));
-    push_curve_table(&mut body, &points);
-    out.push_str(&card("Vote curve", &body));
+fn push_nav(out: &mut String, page: &DayPage<'_>) {
+    let today = Day::from_ms(page.chrome.as_of_ms);
+    let previous = page.day.previous();
+    out.push_str("<nav aria-label=\"Days\"><a href=\"");
+    out.push_str(&previous.to_string());
+    out.push_str(".html\">← ");
+    out.push_str(&previous.to_string());
+    out.push_str("</a>");
+    if page.day != today {
+        let next = page.day.next();
+        if next == today {
+            out.push_str("<a href=\"../index.html\">Today →</a>");
+        } else {
+            out.push_str("<a href=\"");
+            out.push_str(&next.to_string());
+            out.push_str(".html\">");
+            out.push_str(&next.to_string());
+            out.push_str(" →</a>");
+        }
+    }
+    out.push_str("</nav>\n");
 }
 
-fn push_curve_table(out: &mut String, points: &[(u64, BTreeMap<Colour, usize>)]) {
-    let colours = colours_in(points);
-    out.push_str("<table>\n<tr><th>Time (UTC)</th>");
+fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
+    let points = curve(page.votes, page.day.open_ms(), page.day.close_ms());
+    let colours = colours_present(&points);
+    out.push_str("<section class=\"card\" aria-labelledby=\"curve-h\">\n<h2 id=\"curve-h\">How the votes moved</h2>\n<div>");
+    for colour in &colours {
+        out.push_str("<span><span style=\"background:");
+        out.push_str(&hex(*colour));
+        out.push_str("\"></span>");
+        push_escaped(out, colour.name());
+        out.push_str("</span>");
+    }
+    out.push_str("<span><span style=\"background:");
+    out.push_str(HATCH);
+    out.push_str("\"></span>not voted yet</span></div>\n");
+    out.push_str("<div role=\"img\" aria-label=\"");
+    push_escaped(out, &curve_label(page.decision));
+    out.push_str("\" style=\"position:relative\">\n<div style=\"position:relative;height:280px;display:flex;align-items:flex-end;gap:4px;border-bottom:1.5px solid #141414\">");
+    out.push_str("<div style=\"position:absolute;left:0;right:0;bottom:50%;border-top:1.5px dashed #141414\"></div>");
+    out.push_str("<span style=\"position:absolute;right:0;bottom:50%\">half of ");
+    out.push_str(&live.to_string());
+    out.push_str("</span>");
+    push_hold_outlines(out, page, &points);
+    for (at_ms, counts) in &points {
+        push_column(out, *at_ms, counts, live);
+    }
+    out.push_str("</div>\n<div style=\"display:flex;gap:4px\">");
+    for (at_ms, _) in &points {
+        out.push_str("<span style=\"flex:1;text-align:center\">");
+        out.push_str(&hour_label(*at_ms));
+        out.push_str("</span>");
+    }
+    out.push_str("</div>\n");
+    push_hold_labels(out, page);
+    out.push_str("</div>\n<details><summary>The values, and how they are taken</summary>\n<p class=\"mono\">");
+    out.push_str(CURVE_RULE);
+    out.push_str("</p>\n<table>\n<tr><th>UTC</th>");
     for colour in &colours {
         out.push_str("<th>");
-        super::layout::push_escaped(out, colour.name());
+        push_escaped(out, colour.name());
         out.push_str("</th>");
     }
     out.push_str("</tr>\n");
-    for (at_ms, counts) in points {
+    for (at_ms, counts) in &points {
         out.push_str("<tr><td>");
         out.push_str(&hhmm(*at_ms));
         out.push_str("</td>");
@@ -89,57 +159,399 @@ fn push_curve_table(out: &mut String, points: &[(u64, BTreeMap<Colour, usize>)])
         }
         out.push_str("</tr>\n");
     }
-    out.push_str("</table>\n");
+    out.push_str("</table>\n</details>\n</section>\n");
 }
 
-fn step_svg(points: &[(u64, BTreeMap<Colour, usize>)]) -> String {
-    let colours = colours_in(points);
-    if points.is_empty() || colours.is_empty() {
-        return String::new();
-    }
-    let max_count = points
-        .iter()
-        .flat_map(|(_, counts)| counts.values().copied())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let height = 100usize;
-    let width = points.len().saturating_mul(10);
-    let mut svg = format!("<svg viewBox=\"0 0 {width} {height}\">\n");
-    for colour in colours {
-        let [red, green, blue] = colour.srgb();
-        let mut drawn = String::new();
-        let mut previous_y = 0usize;
-        for (index, (_, counts)) in points.iter().enumerate() {
-            let count = counts.get(&colour).copied().unwrap_or(0);
-            let x = index.saturating_mul(10);
-            let y = y_of(count, max_count, height);
-            if index == 0 {
-                drawn.push_str(&format!("{x},{y}"));
-            } else {
-                drawn.push_str(&format!(" {x},{previous_y} {x},{y}"));
-            }
-            previous_y = y;
+fn push_column(out: &mut String, at_ms: u64, counts: &BTreeMap<Colour, usize>, live: usize) {
+    out.push_str("<div data-hour=\"");
+    out.push_str(&hhmm(at_ms));
+    out.push_str("\" style=\"flex:1;height:100%;display:flex;flex-direction:column;justify-content:flex-end\"><div style=\"height:100%;display:flex;flex-direction:column-reverse\">");
+    let mut named = 0usize;
+    for colour in Colour::ALL {
+        let count = counts.get(&colour).copied().unwrap_or(0);
+        if count == 0 {
+            continue;
         }
-        svg.push_str(&format!(
-            "<polyline fill=\"none\" stroke=\"#{red:02X}{green:02X}{blue:02X}\" points=\"{drawn}\"/>\n"
-        ));
+        named += count;
+        out.push_str("<div data-colour=\"");
+        out.push_str(colour.name());
+        out.push_str("\" style=\"height:");
+        out.push_str(&percent(count, live));
+        out.push_str("%;background:");
+        out.push_str(&hex(colour));
+        out.push_str("\"></div>");
     }
-    svg.push_str("</svg>\n");
-    svg
+    let remainder = live.saturating_sub(named);
+    if remainder > 0 {
+        out.push_str("<div data-colour=\"not-voted-yet\" style=\"height:");
+        out.push_str(&percent(remainder, live));
+        out.push_str("%;background:");
+        out.push_str(HATCH);
+        out.push_str("\"></div>");
+    }
+    out.push_str("</div></div>");
 }
 
-fn y_of(count: usize, max_count: usize, height: usize) -> usize {
-    let scaled = count.saturating_mul(height) / max_count.max(1);
-    height.saturating_sub(scaled.min(height))
+fn push_hold_outlines(
+    out: &mut String,
+    page: &DayPage<'_>,
+    points: &[(u64, BTreeMap<Colour, usize>)],
+) {
+    if points.is_empty() {
+        return;
+    }
+    let width = 100.0 / points.len() as f64;
+    for (from_ms, _) in lasting_holds(page) {
+        out.push_str("<div style=\"position:absolute;top:-6px;bottom:-6px;left:");
+        out.push_str(&format!("{:.2}", chart_left(from_ms, points.len())));
+        out.push_str("%;width:");
+        out.push_str(&format!("{width:.2}"));
+        out.push_str("%;box-shadow:0 0 0 2.5px #141414\"></div>");
+    }
 }
 
-fn colours_in(points: &[(u64, BTreeMap<Colour, usize>)]) -> BTreeSet<Colour> {
-    let mut colours = BTreeSet::new();
-    for (_, counts) in points {
-        colours.extend(counts.keys().copied());
+fn push_hold_labels(out: &mut String, page: &DayPage<'_>) {
+    for (from_ms, to_ms) in lasting_holds(page) {
+        out.push_str("<p>held ");
+        out.push_str(&hhmm(from_ms));
+        out.push('\u{2013}');
+        out.push_str(&hhmm(to_ms));
+        out.push_str("</p>\n");
     }
-    colours
+}
+
+fn lasting_holds(page: &DayPage<'_>) -> Vec<(u64, u64)> {
+    let live = live_voters(page.votes, page.day.open_ms(), page.day.close_ms());
+    holds(page.votes, &live, page.day.open_ms(), page.day.close_ms())
+        .into_iter()
+        .filter_map(|hold| {
+            let end = hold.to_ms.unwrap_or(page.day.close_ms());
+            let qualified = hold.from_ms.checked_add(HOLD_MS)?;
+            (end.saturating_sub(hold.from_ms) >= HOLD_MS).then_some((hold.from_ms, qualified))
+        })
+        .collect()
+}
+
+fn push_numbers(out: &mut String, page: &DayPage<'_>, live: usize) {
+    let until = page
+        .chrome
+        .as_of_ms
+        .clamp(page.day.open_ms(), page.day.close_ms());
+    let cast = votes_cast(page.votes, page.day.open_ms(), until);
+    let changes: usize = vote_changes(page.votes).values().sum();
+    let fetched: usize = fetches(page.evidence).values().sum();
+    out.push_str("<div style=\"display:flex;flex-wrap:wrap;gap:12px\">\n");
+    push_stat(out, live, "live voters", LIVE_RULE);
+    push_stat(out, cast, "votes cast", VOTES_CAST_RULE);
+    push_stat(out, changes, "vote changes", VOTE_CHANGES_RULE);
+    push_stat(out, fetched, "fetches", FETCHES_RULE);
+    push_stat(out, page.arguments.len(), "arguments", ARGUMENTS_RULE);
+    out.push_str("</div>\n");
+}
+
+fn push_stat(out: &mut String, number: usize, label: &str, rule: &str) {
+    out.push_str("<section class=\"card\" style=\"flex:1 1 190px\"><span style=\"font-size:40px;font-weight:800\">");
+    out.push_str(&number.to_string());
+    out.push_str("</span><span>");
+    push_escaped(out, label);
+    out.push_str("</span>");
+    push_formula(out, rule);
+    out.push_str("</section>\n");
+}
+
+fn push_formula(out: &mut String, rule: &str) {
+    out.push_str("<details class=\"formula\"><summary>formula</summary><p class=\"mono\">");
+    out.push_str(rule);
+    out.push_str("</p></details>");
+}
+
+struct ThreadItem {
+    at_ms: u64,
+    rank: u8,
+    tie: String,
+    body: String,
+}
+
+fn push_thread(out: &mut String, page: &DayPage<'_>, live: &[String]) {
+    let mut items = Vec::new();
+    push_argument_items(&mut items, page);
+    push_change_items(&mut items, page);
+    push_hold_items(&mut items, page, live);
+    if let Some(Decision::Decided {
+        colour, held_to_ms, ..
+    }) = page.decision
+    {
+        let mut body = String::from("<li><span class=\"mono\">");
+        body.push_str(&hhmm(held_to_ms));
+        body.push_str("</span><p>");
+        push_escaped(&mut body, colour.name());
+        body.push_str(" held more than half for a continuous hour. Decided: ");
+        push_escaped(&mut body, colour.name());
+        body.push_str(".</p></li>\n");
+        items.push(ThreadItem {
+            at_ms: held_to_ms,
+            rank: 3,
+            tie: colour.name().to_owned(),
+            body,
+        });
+    }
+    items.sort_by(|left, right| {
+        (left.at_ms, left.rank, left.tie.as_str()).cmp(&(
+            right.at_ms,
+            right.rank,
+            right.tie.as_str(),
+        ))
+    });
+    out.push_str("<section class=\"card\" aria-labelledby=\"thread-h\">\n<h2 id=\"thread-h\">The whole day, oldest first</h2>\n<ol>\n");
+    for item in items {
+        out.push_str(&item.body);
+    }
+    out.push_str("</ol>\n</section>\n");
+}
+
+fn push_argument_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
+    let mut arguments: Vec<_> = page.arguments.iter().collect();
+    arguments.sort_by(|left, right| {
+        (left.at_ms, left.author.as_str(), left.id.as_str()).cmp(&(
+            right.at_ms,
+            right.author.as_str(),
+            right.id.as_str(),
+        ))
+    });
+    for argument in arguments {
+        let colour = current_votes(page.votes, argument.at_ms)
+            .get(&argument.author)
+            .copied();
+        let mut body = String::from("<li><span class=\"mono\">");
+        body.push_str(&hhmm(argument.at_ms));
+        body.push_str("</span><p>");
+        body.push_str(&peer(&page.chrome, &argument.author));
+        body.push_str(" argued, voting ");
+        if let Some(colour) = colour {
+            body.push_str(&chip(colour));
+        }
+        body.push_str("</p>\n<blockquote>");
+        push_escaped(&mut body, &argument.text);
+        body.push_str("</blockquote>\n<p><code>");
+        push_escaped(&mut body, &argument.id);
+        body.push_str("</code></p>\n");
+        if argument.cites.is_empty() {
+            body.push_str("<p>cites no evidence</p>\n");
+        } else {
+            for cite in &argument.cites {
+                body.push_str("<p><a href=\"#fact-");
+                push_escaped(&mut body, &cite.id().0);
+                body.push_str("\">");
+                push_escaped(&mut body, cite.url().as_str());
+                body.push(' ');
+                push_escaped(&mut body, cite.excerpt());
+                body.push_str("</a></p>\n");
+            }
+        }
+        body.push_str("</li>\n");
+        items.push(ThreadItem {
+            at_ms: argument.at_ms,
+            rank: 0,
+            tie: format!("{} {}", argument.author, argument.id),
+            body,
+        });
+    }
+}
+
+fn push_change_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
+    for (author, trail) in trails(page.votes) {
+        let mut previous = None;
+        for (at_ms, colour) in trail {
+            if let Some(from) = previous.filter(|from| *from != colour) {
+                let mut body = String::from("<li><span class=\"mono\">");
+                body.push_str(&hhmm(at_ms));
+                body.push_str("</span><p>");
+                body.push_str(&peer(&page.chrome, &author));
+                body.push_str(" changed vote ");
+                body.push_str(&chip(from));
+                body.push_str(&chip(colour));
+                body.push_str("</p></li>\n");
+                items.push(ThreadItem {
+                    at_ms,
+                    rank: 1,
+                    tie: author.clone(),
+                    body,
+                });
+            }
+            previous = Some(colour);
+        }
+    }
+}
+
+fn push_hold_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>, live: &[String]) {
+    let runs = holds(page.votes, live, page.day.open_ms(), page.day.close_ms());
+    for hold in runs {
+        let current = current_votes(page.votes, hold.from_ms);
+        let holding = live
+            .iter()
+            .filter(|author| current.get(*author) == Some(&hold.colour))
+            .count();
+        let mut body = String::from("<li><span class=\"mono\">");
+        body.push_str(&hhmm(hold.from_ms));
+        body.push_str("</span><p>");
+        push_escaped(&mut body, hold.colour.name());
+        body.push_str(" holds ");
+        body.push_str(&holding.to_string());
+        body.push_str(" of ");
+        body.push_str(&live.len().to_string());
+        body.push_str(", more than half. The hour starts.</p></li>\n");
+        items.push(ThreadItem {
+            at_ms: hold.from_ms,
+            rank: 2,
+            tie: hold.colour.name().to_owned(),
+            body,
+        });
+    }
+}
+
+fn push_facts(out: &mut String, page: &DayPage<'_>) {
+    let cited = citation_counts(page.arguments);
+    let mut facts: Vec<&Evidence> = page.evidence.iter().collect();
+    facts.sort_by(|left, right| {
+        (left.fetched_at_ms(), left.id().0.as_str())
+            .cmp(&(right.fetched_at_ms(), right.id().0.as_str()))
+    });
+    out.push_str(
+        "<section aria-labelledby=\"facts-h\">\n<h2 id=\"facts-h\">The day\u{2019}s facts</h2>\n",
+    );
+    for fact in facts {
+        let id = fact.id().0.as_str();
+        out.push_str("<article id=\"fact-");
+        push_escaped(out, id);
+        out.push_str("\">\n<p class=\"mono\">");
+        push_escaped(out, fact.url().as_str());
+        out.push_str(" · ");
+        push_escaped(out, id);
+        out.push_str("</p>\n<p>");
+        push_escaped(out, fact.excerpt());
+        out.push_str("</p>\n<p>fetched by ");
+        out.push_str(&peer(&page.chrome, fact.author()));
+        out.push_str("</p>\n<p>cited ");
+        out.push_str(&cited.get(id).copied().unwrap_or(0).to_string());
+        out.push_str("</p>\n</article>\n");
+    }
+    out.push_str("</section>\n");
+}
+
+fn citation_counts(arguments: &[super::ArgumentView]) -> BTreeMap<String, usize> {
+    citations(
+        arguments
+            .iter()
+            .map(|argument| argument.cites.iter().map(Evidence::id)),
+    )
+}
+
+fn colours_present(points: &[(u64, BTreeMap<Colour, usize>)]) -> Vec<Colour> {
+    Colour::ALL
+        .into_iter()
+        .filter(|colour| {
+            points
+                .iter()
+                .any(|(_, counts)| counts.get(colour).copied().unwrap_or(0) > 0)
+        })
+        .collect()
+}
+
+fn curve_label(decision: Option<Decision>) -> String {
+    let mut label = String::from("Hourly vote counts by colour from 01:00 to 23:00 UTC");
+    match decision {
+        Some(Decision::Decided {
+            colour,
+            held_from_ms,
+            held_to_ms,
+        }) => {
+            label.push_str("; ");
+            label.push_str(colour.name());
+            label.push_str(" held from ");
+            label.push_str(&hhmm(held_from_ms));
+            label.push_str(" to ");
+            label.push_str(&hhmm(held_to_ms));
+        }
+        Some(Decision::Undecided) => {
+            label.push_str("; no colour held for a continuous hour");
+        }
+        None => label.push_str("; the day is open"),
+    }
+    label
+}
+
+fn chart_left(at_ms: u64, columns: usize) -> f64 {
+    let seconds = ((at_ms / 1000) % 86_400) as f64;
+    let hours = seconds / 3_600.0;
+    if columns == 0 {
+        0.0
+    } else {
+        (hours - 0.5) / columns as f64 * 100.0
+    }
+}
+
+fn hour_label(at_ms: u64) -> String {
+    let hour = ((at_ms / 1000) % 86_400) / 3_600;
+    if hour == 1 || hour.is_multiple_of(3) {
+        format!("{hour:02}")
+    } else {
+        String::new()
+    }
+}
+
+fn percent(count: usize, total: usize) -> String {
+    if total == 0 {
+        return "0.000".to_owned();
+    }
+    let millis = count.saturating_mul(100_000) / total;
+    format!("{}.{:03}", millis / 1_000, millis % 1_000)
+}
+
+fn capitalise(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn long_date(day: Day) -> String {
+    let (_, number) = day.month_day();
+    format!(
+        "{} {number} {} {}",
+        day.weekday_name(),
+        day.month_name(),
+        year_of(day)
+    )
+}
+
+fn prose_date(day: Day) -> String {
+    let (_, number) = day.month_day();
+    format!("{} {number} {}", day.weekday_name(), day.month_name())
+}
+
+fn status_line(day: Day, open: bool) -> String {
+    let (_, number) = day.month_day();
+    let status = if open {
+        "OPEN UNTIL 23:00 UTC"
+    } else {
+        "CLOSED 23:00 UTC"
+    };
+    format!(
+        "{} {number} {} {} · {status}",
+        day.weekday_name().to_ascii_uppercase(),
+        day.month_name().to_ascii_uppercase(),
+        year_of(day)
+    )
+}
+
+fn year_of(day: Day) -> String {
+    day.to_string().split('-').next().unwrap_or("").to_owned()
+}
+
+fn hex(colour: Colour) -> String {
+    let [red, green, blue] = colour.srgb();
+    format!("#{red:02X}{green:02X}{blue:02X}")
 }
 
 fn hhmm(unix_ms: u64) -> String {
@@ -151,13 +563,20 @@ fn hhmm(unix_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use url::Url;
+
     use super::render_day;
-    use crate::closing::{Decision, HOLD_MS};
-    use crate::closing::{LIVE_RULE, RULE};
-    use crate::colour::Colour::Blue;
-    use crate::site::Paint;
+    use crate::closing::{Decision, HOLD_MS, LIVE_RULE, RULE};
+    use crate::colour::Colour::{self, Blue, Red};
+    use crate::day::Day;
+    use crate::evidence::Evidence;
     use crate::site::support::{assert_clean, body_open, page, vote};
-    use crate::tally::CURVE_RULE;
+    use crate::site::{ArgumentView, Chrome, DayPage, Paint};
+    use crate::tally::{
+        ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, curve,
+    };
 
     #[test]
     fn render_day_paints_a_blue_decision_and_publishes_both_rules() {
@@ -176,12 +595,23 @@ mod tests {
         let html = render_day(&shown);
         assert!(html.contains("<body style=\"background:#0000FF;color:#FFFFFF\">"));
         assert!(html.contains("background:#0000FF"));
-        assert!(html.contains("blue"));
-        assert!(html.contains("held 00:00\u{2013}01:00 UTC"));
+        assert!(html.contains("Blue."));
+        assert!(html.contains("from 00:00 to 01:00 UTC"));
+        assert!(html.contains("It painted Friday 2 January."));
         assert!(html.contains(RULE));
         assert!(html.contains(LIVE_RULE));
         assert!(html.contains(CURVE_RULE));
-        assert!(html.contains("stroke=\"#0000FF\""));
+        assert!(html.contains(VOTES_CAST_RULE));
+        assert!(html.contains(VOTE_CHANGES_RULE));
+        assert!(html.contains(FETCHES_RULE));
+        assert!(html.contains(ARGUMENTS_RULE));
+        assert!(html.contains("held 00:00\u{2013}01:00"));
+        assert!(html.contains("blue holds 2 of 2, more than half. The hour starts."));
+        assert!(!html.contains("stroke="));
+        assert!(!html.contains("<svg"));
+        assert!(!html.contains("<polyline"));
+        assert_eq!(html.matches("data-hour=\"").count(), 23);
+        assert_eq!(html.matches("<tr><td>").count(), 23);
         assert_clean(&html);
     }
 
@@ -189,8 +619,219 @@ mod tests {
     fn render_day_undecided_sets_no_background() {
         let shown = page(&[], &[], &[], Some(Decision::Undecided), Paint::Undecided);
         let html = render_day(&shown);
-        assert!(html.contains("Undecided"));
+        assert!(html.contains("Undecided."));
+        assert!(html.contains("Friday 2 January was left unpainted."));
+        assert!(html.contains("The rule that decided it"));
         assert_eq!(body_open(&html), "<body>");
         assert_clean(&html);
+    }
+
+    #[test]
+    fn a_live_day_says_open_and_has_no_next_link() {
+        let shown = page(&[], &[], &[], None, Paint::NoRecord);
+        let html = render_day(&shown);
+        assert!(html.contains("Open."));
+        assert!(html.contains("The question is open until 23:00 UTC."));
+        assert!(html.contains("The rule that will decide it"));
+        assert!(html.contains("OPEN UNTIL 23:00 UTC"));
+        assert!(!html.contains("Today →"));
+        assert!(!html.contains("1970-01-02.html"));
+        assert!(html.contains("href=\"1969-12-31.html\""));
+        assert_clean(&html);
+    }
+
+    #[test]
+    fn a_blue_afternoon_stacks_the_curve_and_one_hold() {
+        let day: Day = "2026-10-25".parse().unwrap();
+        let today: Day = "2026-10-26".parse().unwrap();
+        let from = day.open_ms() + 17 * 3_600_000 + 10 * 60 * 1000;
+        let mut votes = Vec::new();
+        for index in 0..5 {
+            votes.push(vote(
+                &format!("p{index:02}"),
+                Red,
+                day.open_ms() + 3_600_000,
+            ));
+        }
+        for index in 5..12 {
+            votes.push(vote(&format!("p{index:02}"), Blue, from));
+        }
+        let names = BTreeMap::new();
+        let shown = DayPage {
+            day,
+            votes: &votes,
+            arguments: &[],
+            evidence: &[],
+            decision: Some(Decision::Decided {
+                colour: Blue,
+                held_from_ms: from,
+                held_to_ms: from + HOLD_MS,
+            }),
+            chrome: Chrome {
+                painted_by: Paint::Decided(Blue),
+                as_of_ms: today.open_ms(),
+                rendered_at_ms: today.open_ms(),
+                server: "peer-a",
+                names: &names,
+            },
+        };
+        let html = render_day(&shown);
+        assert!(html.contains("Blue."));
+        assert!(html.contains("from 17:10 to 18:10 UTC"));
+        assert!(html.contains("It painted Monday 26 October."));
+        assert!(html.contains("SUNDAY 25 OCTOBER 2026 · CLOSED 23:00 UTC"));
+        assert!(html.contains("Today →"));
+        assert!(html.contains("href=\"2026-10-24.html\""));
+        assert!(!html.contains("href=\"2026-10-26.html\""));
+        assert_eq!(html.matches("held 17:10\u{2013}18:10").count(), 1);
+        assert_eq!(html.matches("data-hour=\"").count(), 23);
+        assert_eq!(html.matches("<tr><td>").count(), 23);
+        assert!(html.contains("aria-label=\"Hourly vote counts by colour from 01:00 to 23:00 UTC; blue held from 17:10 to 18:10\""));
+
+        let points = curve(&votes, day.open_ms(), day.close_ms());
+        assert_eq!(points.len(), 23);
+        let at = day.open_ms() + 18 * 3_600_000;
+        let counts = &points
+            .iter()
+            .find(|(stamp, _)| *stamp == at)
+            .expect("18:00")
+            .1;
+        let column = column_at(&html, "18:00");
+        let mut seen = 0;
+        for colour in Colour::ALL {
+            let count = counts.get(&colour).copied().unwrap_or(0);
+            if count == 0 {
+                continue;
+            }
+            seen += 1;
+            let millis = count * 100_000 / 12;
+            let height = format!("{}.{:03}", millis / 1_000, millis % 1_000);
+            let needle = format!(
+                "data-colour=\"{}\" style=\"height:{height}%;",
+                colour.name()
+            );
+            assert!(column.contains(&needle), "missing {needle} in {column}");
+        }
+        assert_eq!(seen, 2);
+        assert!(!column.contains("not-voted-yet"));
+        assert_markup_clean(&html);
+    }
+
+    #[test]
+    fn the_thread_lists_arguments_changes_and_markers_oldest_first() {
+        let day = Day::from_ms(0);
+        let votes = [
+            vote("ada", Red, 3_600_000),
+            vote("ada", Blue, 3 * 3_600_000),
+        ];
+        let arguments = [ArgumentView {
+            id: "arg-9".to_owned(),
+            author: "ada".to_owned(),
+            at_ms: 2 * 3_600_000,
+            text: "hello".to_owned(),
+            cites: Vec::new(),
+        }];
+        let names = BTreeMap::new();
+        let shown = DayPage {
+            day,
+            votes: &votes,
+            arguments: &arguments,
+            evidence: &[],
+            decision: Some(Decision::Decided {
+                colour: Red,
+                held_from_ms: 3_600_000,
+                held_to_ms: 2 * 3_600_000,
+            }),
+            chrome: Chrome {
+                painted_by: Paint::Decided(Red),
+                as_of_ms: 0,
+                rendered_at_ms: 3_723_000,
+                server: "peer-a",
+                names: &names,
+            },
+        };
+        let html = render_day(&shown);
+        let first_hold = html.find("The hour starts").expect("first hold");
+        let hello = html.find("hello").expect("argument");
+        let decided = html
+            .find("continuous hour. Decided:")
+            .expect("decided marker");
+        let change = html.find("changed vote").expect("vote change");
+        let second_hold = html[first_hold + 1..]
+            .find("The hour starts")
+            .expect("second hold")
+            + first_hold
+            + 1;
+        assert!(first_hold < hello && hello < decided && decided < change && change < second_hold);
+        assert_eq!(html.matches("changed vote").count(), 1);
+        assert!(html.contains("cites no evidence"));
+        assert!(html.contains("red holds 1 of 1, more than half. The hour starts."));
+        assert!(html.contains("blue holds 1 of 1, more than half. The hour starts."));
+        assert_clean(&html);
+    }
+
+    #[test]
+    fn facts_anchor_every_record_and_count_citations() {
+        let evidence = Evidence::new(
+            "ada".to_owned(),
+            "run".to_owned(),
+            Url::parse("https://example.com/fact").unwrap(),
+            0,
+            "a fact",
+        );
+        let arguments = [ArgumentView {
+            id: "arg-1".to_owned(),
+            author: "ada".to_owned(),
+            at_ms: 0,
+            text: "because".to_owned(),
+            cites: vec![evidence.clone()],
+        }];
+        let records = [evidence.clone()];
+        let names = BTreeMap::new();
+        let shown = DayPage {
+            day: Day::from_ms(0),
+            votes: &[],
+            arguments: &arguments,
+            evidence: &records,
+            decision: None,
+            chrome: Chrome {
+                painted_by: Paint::NoRecord,
+                as_of_ms: 0,
+                rendered_at_ms: 3_723_000,
+                server: "peer-a",
+                names: &names,
+            },
+        };
+        let html = render_day(&shown);
+        let id = evidence.id().0.as_str();
+        assert!(html.contains(&format!("id=\"fact-{id}\"")));
+        assert!(html.contains(&format!("href=\"#fact-{id}\"")));
+        assert!(html.contains("a fact"));
+        assert!(html.contains("cited 1"));
+        assert!(html.contains("https://example.com/fact"));
+        assert_clean(&html);
+    }
+
+    fn column_at<'a>(html: &'a str, hour: &str) -> &'a str {
+        let marker = format!("data-hour=\"{hour}\"");
+        let start = html
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {hour}"));
+        let rest = &html[start..];
+        let end = rest[marker.len()..]
+            .find("data-hour=")
+            .map(|at| at + marker.len())
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    fn assert_markup_clean(html: &str) {
+        let lower = html.to_ascii_lowercase();
+        assert!(!lower.contains("<script"));
+        assert!(!lower.contains("<link"));
+        assert!(!lower.contains("src="));
+        for word in crate::site::support::FORBIDDEN {
+            assert!(!lower.contains(word), "{word}");
+        }
     }
 }
