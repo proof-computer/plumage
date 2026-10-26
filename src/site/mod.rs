@@ -259,16 +259,23 @@ mod tests {
             },
         ];
         let shown = support::page(&[], &arguments, &[], None, super::Paint::NoRecord);
-        for html in [render_front(&shown), render_day(&shown)] {
+        let front = render_front(&shown);
+        let day = render_day(&shown);
+        for html in [&front, &day] {
             assert!(html.contains(support::ESCAPED));
             assert!(!html.contains(support::RAW));
             assert!(!html.contains("<script"));
-            assert!(html.contains("cites no evidence"));
-            assert!(html.contains("https://example.com/fact"));
-            let raw_at = html.find("arg-1").expect("earlier argument id");
-            let plain_at = html.find("arg-2").expect("later argument id");
-            assert!(raw_at < plain_at);
-            assert_clean(&html);
+            assert_clean(html);
         }
+        // The day page still lists every argument, oldest first, including the
+        // cite URL. Today keeps the escaped text and drops that wording.
+        assert!(day.contains("plain"));
+        assert!(day.contains("cites no evidence"));
+        assert!(day.contains("https://example.com/fact"));
+        let raw_at = day.find("arg-1").expect("earlier argument id");
+        let plain_at = day.find("arg-2").expect("later argument id");
+        assert!(raw_at < plain_at);
+        assert!(front.contains("argued, voting"));
+        assert!(front.contains("no vote yet"));
     }
 }
