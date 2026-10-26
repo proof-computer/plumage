@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const HOLD_MS: u64 = 3_600_000;
 pub const RULE: &str = "The day's colour is the first colour held by more than half of the live voters for a continuous hour ending at or before close; otherwise the day is undecided.";
+pub const LIVE_RULE: &str = "The live voters are the distinct authors of vote records cast between the day's open (00:00 UTC) and close (23:00 UTC).";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Vote {
@@ -55,6 +56,19 @@ pub fn decide(votes: &[Vote], live: &[String], open_ms: u64, close_ms: u64) -> D
         }
     }
     completed(held, close_ms).unwrap_or(Decision::Undecided)
+}
+
+/// Distinct authors of votes with `open_ms <= at_ms <= close_ms`, in author order.
+///
+/// An empty window, including `open_ms > close_ms`, has no live voters.
+pub fn live_voters(votes: &[Vote], open_ms: u64, close_ms: u64) -> Vec<String> {
+    let mut authors = BTreeSet::new();
+    for vote in votes {
+        if open_ms <= vote.at_ms && vote.at_ms <= close_ms {
+            authors.insert(vote.author.clone());
+        }
+    }
+    authors.into_iter().collect()
 }
 
 fn completed(held: Option<(Colour, u64)>, until_ms: u64) -> Option<Decision> {
@@ -223,6 +237,34 @@ mod tests {
             decide(&votes, &live(&["a"]), HOLD_MS, 0),
             Decision::Undecided
         );
+    }
+
+    #[test]
+    fn live_voters_drop_outsiders_and_repeats_and_two_of_three_decide_blue() {
+        let open = 1_000;
+        let votes = [
+            vote("b", Blue, open),
+            vote("a", Blue, open),
+            vote("a", Blue, open + 1),
+            vote("c", Red, open),
+            vote("z", Blue, open - 1),
+            vote("y", Blue, open + HOLD_MS + 1),
+        ];
+        let voters = live_voters(&votes, open, open + HOLD_MS);
+        assert_eq!(voters, live(&["a", "b", "c"]));
+        assert_eq!(decide(&votes, &voters, open, open + HOLD_MS), blue_at(open));
+    }
+
+    #[test]
+    fn live_voters_keep_both_edges_and_drop_an_empty_window() {
+        let votes = [
+            vote("a", Blue, 5),
+            vote("a", Red, 5),
+            vote("b", Blue, 4),
+            vote("c", Blue, 6),
+        ];
+        assert_eq!(live_voters(&votes, 5, 5), live(&["a"]));
+        assert!(live_voters(&votes, 6, 5).is_empty());
     }
 
     #[test]
