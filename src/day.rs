@@ -10,6 +10,31 @@ pub const CLOSE_AFTER_MS: u64 = 23 * 3_600_000;
 
 const DAY_MS: u64 = 86_400_000;
 
+const WEEKDAYS: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
 /// A real UTC calendar date.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Day {
@@ -51,6 +76,27 @@ impl Day {
     /// `(month, day)`, both numbered from 1.
     pub fn month_day(&self) -> (u8, u8) {
         (self.month, self.day)
+    }
+
+    /// Monday is 0 and Sunday is 6. 1970-01-01, day zero of the civil count, is Thursday.
+    pub fn weekday(&self) -> u8 {
+        let days = days_from_civil(self.year, i64::from(self.month), i64::from(self.day));
+        u8::try_from((days + 3).rem_euclid(7)).expect("weekday is 0..=6")
+    }
+
+    /// `Monday` through `Sunday`, matching [`Self::weekday`].
+    pub fn weekday_name(&self) -> &'static str {
+        WEEKDAYS[usize::from(self.weekday())]
+    }
+
+    /// `January` through `December`.
+    pub fn month_name(&self) -> &'static str {
+        MONTHS[usize::from(self.month) - 1]
+    }
+
+    /// The first civil day of this month.
+    pub fn first_of_month(&self) -> Day {
+        self.shift(1 - i64::from(self.day))
     }
 
     fn shift(&self, by: i64) -> Day {
@@ -208,5 +254,24 @@ mod tests {
         assert_eq!(leap.next().previous(), leap);
         let last: Day = "9999-12-31".parse().unwrap();
         assert_eq!(last.to_string(), "9999-12-31");
+    }
+
+    #[test]
+    fn weekday_month_name_and_first_of_month() {
+        let epoch: Day = "1970-01-01".parse().unwrap();
+        assert_eq!(epoch.weekday(), 3);
+        assert_eq!(epoch.weekday_name(), "Thursday");
+
+        let monday: Day = "2026-10-26".parse().unwrap();
+        assert_eq!(monday.weekday(), 0);
+        assert_eq!(monday.weekday_name(), "Monday");
+        assert_eq!(monday.month_name(), "October");
+
+        let leap: Day = "2000-02-29".parse().unwrap();
+        assert_eq!(leap.weekday(), 1);
+        assert_eq!(leap.weekday_name(), "Tuesday");
+
+        let february: Day = "2024-02-29".parse().unwrap();
+        assert_eq!(february.first_of_month(), "2024-02-01".parse().unwrap());
     }
 }
