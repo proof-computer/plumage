@@ -39,8 +39,11 @@ limited to 400 characters and eight citations fetched by their author in the
 same run. Peer-id SHA-256 hashes seed the initial event offset. The fetch
 executor exists for the two sources and stores bounded evidence. The site
 renders from votes, arguments and evidence as exact counts with the published
-formulas, painted by the decided colour. The peer writes those pages in the next
-packet. The binary still prints its version and exits.
+formulas. Every page shares one shell: the decided colour is the page ground,
+Bricolage Grotesque and IBM Plex Mono are served beside the pages, and the
+masthead, 24-colour band, white cards and freshness footer are the same on
+each page. What each existing page says is unchanged. The peer writes those
+pages in a later packet. The binary still prints its version and exits.
 
 ## Rules the swarm keeps
 
