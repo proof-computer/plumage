@@ -6,3 +6,5 @@ pub mod colour;
 pub mod day;
 pub mod evidence;
 pub mod fetch;
+pub mod site;
+pub mod tally;
