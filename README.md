@@ -36,9 +36,10 @@ schema and validation. Fetch intents permit only the Wikimedia on-this-day
 feed and London's sunrise/sunset JSON API, with three fetches per activation.
 Evidence retains a SHA-256 digest and at most 600 characters; arguments are
 limited to 400 characters and eight citations fetched by their author in the
-same run. Peer-id SHA-256 hashes seed the initial event offset. These types
-perform no network requests. The binary still prints its version and exits;
-the peer and site come later (orchestrator ADR-0258).
+same run. Peer-id SHA-256 hashes seed the initial event offset. The fetch
+executor exists for the two sources and stores bounded evidence. The binary
+still prints its version and exits; the peer and site come later
+(orchestrator ADR-0258).
 
 ## Rules the swarm keeps
 

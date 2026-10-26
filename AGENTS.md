@@ -8,6 +8,8 @@ documentation and delivery; this file governs local conventions.
 
 - `Cargo.toml`: one application package building the `plumage` binary; commit
   `Cargo.lock`.
+- `src/lib.rs`: the library the binary, tests and lab use; every module is
+  declared here.
 - `src/main.rs`: the entrypoint. Keep it small as functionality lands in
   focused modules.
 - `rust-toolchain.toml`: the pinned development and CI toolchain.
