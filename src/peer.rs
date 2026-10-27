@@ -27,8 +27,8 @@ use crate::error::{Error, Result};
 use crate::evidence::Evidence;
 use crate::fetch::{self, Source};
 use crate::site::{
-    self, ArchivePage, ArgumentView, Chrome, DayPage, Paint, render_archive, render_day,
-    render_flock, render_front, render_how,
+    self, Activations, ArchivePage, ArgumentView, Chrome, DayPage, MAX_STATUS_BYTES, Paint, Phase,
+    StatusInput, render_archive, render_day, render_flock, render_front, render_how, render_status,
 };
 
 /// Run from `config.clock.day()` through `last_day`. `shutdown` returns `Ok`.
@@ -38,6 +38,10 @@ pub async fn run<S: Source + 'static>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     config.validate()?;
+    let mut state = RunState {
+        activations: Activations::default(),
+        started_real_ms: forthebirds_store::now(),
+    };
     tokio::fs::create_dir_all(&config.data_dir)
         .await
         .map_err(storage)?;
@@ -50,6 +54,25 @@ pub async fn run<S: Source + 'static>(
         tokio::fs::create_dir_all(parent).await.map_err(storage)?;
     }
     write_assets(&config.site_dir).await?;
+    let mut day = config.clock.day();
+    let previous_day = day.previous();
+    let phase = if config.clock.now_ms() >= day.close_ms() {
+        Phase::SyncOnly
+    } else {
+        Phase::Voting
+    };
+    write_status(
+        &config,
+        day,
+        phase,
+        None,
+        &state,
+        (
+            previous_day,
+            read_paint(&config.site_dir, previous_day).await?,
+        ),
+    )
+    .await?;
     let model = Model::new(&InferenceConfig {
         model_url: config.model_url.clone(),
         embedding_url: None,
@@ -60,12 +83,11 @@ pub async fn run<S: Source + 'static>(
         request_timeout_seconds: config.request_timeout_seconds,
         user_agent: fetch::USER_AGENT.to_owned(),
     })?;
-    let mut day = config.clock.day();
     let names = display_names(&config.peer_id, std::iter::empty());
     write_how(
         &config,
         &names,
-        read_paint(&config.site_dir, day.previous()).await?,
+        read_paint(&config.site_dir, previous_day).await?,
     )
     .await?;
     loop {
@@ -77,7 +99,7 @@ pub async fn run<S: Source + 'static>(
         {
             return Ok(());
         }
-        let stop = run_day(&config, &model, &source, day, &mut shutdown).await?;
+        let stop = run_day(&config, &model, &source, day, &mut shutdown, &mut state).await?;
         if stop || config.last_day == Some(day) {
             return Ok(());
         }
@@ -92,6 +114,7 @@ async fn run_day<S: Source>(
     source: &S,
     day: Day,
     shutdown: &mut watch::Receiver<bool>,
+    state: &mut RunState,
 ) -> Result<bool> {
     let book = Book::open(ledger_config(config, day)).await?;
     let replicator = Replicator::new(
@@ -140,6 +163,28 @@ async fn run_day<S: Source>(
         }
         let now = config.clock.now_ms();
         if now >= day.close_ms() {
+            let previous = day.previous();
+            let paint = match read_paint(&config.site_dir, previous).await {
+                Ok(paint) => paint,
+                Err(error) => {
+                    session.finish().await?;
+                    return Err(error);
+                }
+            };
+            let index = book.index();
+            if let Err(error) = write_status(
+                config,
+                day,
+                Phase::SyncOnly,
+                Some(&index),
+                state,
+                (previous, paint),
+            )
+            .await
+            {
+                session.finish().await?;
+                return Err(error);
+            }
             break;
         }
         let due = last_start.is_none_or(|started: u64| {
@@ -170,17 +215,49 @@ async fn run_day<S: Source>(
         )
         .await
         {
-            Ok(colour) => println!(
-                "plumage activation day={day} peer={} id={id} outcome=voted:{}",
-                config.peer_id,
-                colour.name()
-            ),
-            Err(error) => println!(
-                "plumage activation day={day} peer={} id={id} outcome=error:{}",
-                config.peer_id, error.code
-            ),
+            Ok(colour) => {
+                state
+                    .activations
+                    .record_vote(colour, forthebirds_store::now());
+                println!(
+                    "plumage activation day={day} peer={} id={id} outcome=voted:{}",
+                    config.peer_id,
+                    colour.name()
+                );
+            }
+            Err(error) => {
+                state
+                    .activations
+                    .record_error(error.code, forthebirds_store::now());
+                println!(
+                    "plumage activation day={day} peer={} id={id} outcome=error:{}",
+                    config.peer_id, error.code
+                );
+            }
         }
         if let Err(error) = write_live(config, &book, day).await {
+            session.finish().await?;
+            return Err(error);
+        }
+        let previous = day.previous();
+        let paint = match read_paint(&config.site_dir, previous).await {
+            Ok(paint) => paint,
+            Err(error) => {
+                session.finish().await?;
+                return Err(error);
+            }
+        };
+        let index = book.index();
+        if let Err(error) = write_status(
+            config,
+            day,
+            Phase::Voting,
+            Some(&index),
+            state,
+            (previous, paint),
+        )
+        .await
+        {
             session.finish().await?;
             return Err(error);
         }
@@ -189,7 +266,7 @@ async fn run_day<S: Source>(
         session.finish().await?;
         return Ok(true);
     }
-    let published = publish_close(config, &book, day).await;
+    let published = publish_close(config, &book, day, state).await;
     let finished = session.finish().await;
     published?;
     finished?;
@@ -265,7 +342,7 @@ async fn write_live(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
     Ok(())
 }
 
-async fn publish_close(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
+async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunState) -> Result<()> {
     let index = book.index();
     let frame = frame_from(&index, &config.clock);
     let open = day.open_ms();
@@ -352,7 +429,15 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day) -> Result<()>
         config.peer_id,
         live.len()
     );
-    Ok(())
+    write_status(
+        config,
+        day,
+        Phase::Closed,
+        Some(&index),
+        state,
+        (day, painted),
+    )
+    .await
 }
 
 struct Frame {
@@ -639,6 +724,58 @@ async fn read_archive(site_dir: &Path) -> Result<Vec<(Day, Paint)>> {
     }
     days.sort_by_key(|(day, _)| *day);
     Ok(days)
+}
+
+struct RunState {
+    activations: Activations,
+    started_real_ms: u64,
+}
+
+async fn write_status(
+    config: &PeerConfig,
+    day: Day,
+    phase: Phase,
+    index: Option<&DayIndex>,
+    state: &RunState,
+    previous_day: (Day, Paint),
+) -> Result<()> {
+    let frame = index.map(|index| frame_from(index, &config.clock));
+    let authors_seen = index.map_or_else(BTreeSet::new, |index| {
+        authors(index).map(ToOwned::to_owned).collect()
+    });
+    let empty_votes: &[Vote] = &[];
+    let empty_evidence: &[Evidence] = &[];
+    let votes = frame
+        .as_ref()
+        .map_or(empty_votes, |frame| frame.votes.as_slice());
+    let evidence = frame
+        .as_ref()
+        .map_or(empty_evidence, |frame| frame.evidence.as_slice());
+    let arguments = frame.as_ref().map_or(0, |frame| frame.arguments.len());
+    let input = StatusInput {
+        peer_id: &config.peer_id,
+        version: env!("CARGO_PKG_VERSION"),
+        commit: option_env!("LISKOV_PLUMAGE_BUILD_COMMIT"),
+        started_real_ms: state.started_real_ms,
+        as_of_ms: forthebirds_store::now(),
+        as_of_sim_ms: config.clock.now_ms(),
+        day,
+        phase,
+        votes,
+        evidence,
+        arguments,
+        authors_seen: &authors_seen,
+        activations: &state.activations,
+        previous_day,
+    };
+    let bytes = render_status(&input);
+    if bytes.len() > MAX_STATUS_BYTES {
+        return Err(Error::new(
+            "storage",
+            format!("status.json is {} bytes", bytes.len()),
+        ));
+    }
+    write_atomic(&config.site_dir.join("status.json"), &bytes).await
 }
 
 async fn write_assets(site_dir: &Path) -> Result<()> {

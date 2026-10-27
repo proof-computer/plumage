@@ -167,7 +167,9 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     let shared = clock();
     let (sender, receiver) = watch::channel(false);
     let config = peer_config(root.path(), "p00", &model, Vec::new(), shared);
+    let started = wall_now();
     peer::run(config, EmptySource, receiver).await.unwrap();
+    let ended = wall_now();
     drop(sender);
     server.abort();
 
@@ -196,6 +198,23 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     for (path, bytes) in ASSETS {
         assert_eq!(std::fs::read(site.join(path)).unwrap(), bytes);
     }
+
+    let status_bytes = std::fs::read(site.join("status.json")).unwrap();
+    assert!(status_bytes.len() <= 16_384);
+    let status: Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status["schema"], "plumage.status.v1");
+    assert_eq!(status["phase"], "closed");
+    assert_eq!(status["day"], DAY);
+    assert_eq!(status["previous_day"]["paint"], "decided:blue");
+    assert!(status["activations"]["voted"].as_u64().unwrap() >= 1);
+    assert_eq!(status["activations"]["errors_by_code"], json!({}));
+    assert_eq!(status["activations"]["recent"]["errors"], 0);
+    assert!(status["activations"]["recent"]["total"].as_u64().unwrap() >= 1);
+    assert_eq!(status["authors_seen"], json!(["p00"]));
+    assert!(status["build"].get("commit").unwrap().is_null());
+    assert_eq!(status["day_open_ms"].as_u64().unwrap(), day().open_ms());
+    let as_of = status["as_of_ms"].as_u64().unwrap();
+    assert!(started <= as_of && as_of <= ended);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -252,4 +271,11 @@ async fn two_peers_replicate_votes_and_stay_undecided_on_a_tie() {
         .collect();
     assert!(authors.contains(&"p00"));
     assert!(authors.contains(&"p01"));
+    for id in ["p00", "p01"] {
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join(format!("{id}-site/status.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["authors_seen"], json!(["p00", "p01"]));
+    }
 }
