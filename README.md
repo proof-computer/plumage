@@ -45,8 +45,33 @@ with the published formulas. Every page shares one shell: the decided colour is 
 Bricolage Grotesque and IBM Plex Mono are served beside the pages, and the
 masthead, 24-colour band, white cards and freshness footer are the same on
 each page. What each existing page says is unchanged. The peer writes those
-pages in a later packet. The binary still prints its version and exits.
-A peer activation runs against a model; the peer process is next.
+pages. A peer runs whole days: `plumage peer <config.json>` opens one ledger
+per day, syncs with its static peers, activates on the day clock, and at the
+next day's open writes that day's result and repaints the site. With no
+arguments the binary prints its version and the usage and exits.
+
+## Running a peer
+
+`plumage peer <config.json>` reads one file and runs until `last_day` or a
+signal. `listen` is an IPv6 address. `peers` may be empty. A token is 32–512
+visible ASCII bytes. Omitted bounds use the defaults below: activations every
+60 seconds of the day clock, sync every 5 seconds of wall time, 16 steps, 4096
+context tokens, 512 output tokens, and a memory budget of 1 000 000.
+
+```json
+{
+  "peer_id": "p00",
+  "data_dir": "data",
+  "site_dir": "site",
+  "model_url": "http://127.0.0.1:8080/",
+  "listen": "[::1]:9743",
+  "advertisement_file": "p00.ad",
+  "peers": [],
+  "token": "replace-with-32-or-more-visible-ascii-characters",
+  "clock": {"real_start_ms": 0, "sim_start_ms": 0, "speed": 1},
+  "last_day": null
+}
+```
 
 ## Rules the swarm keeps
 

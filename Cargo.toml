@@ -14,12 +14,16 @@ path = "src/main.rs"
 
 [dependencies]
 forthebirds-inference = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
+forthebirds-names = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
+forthebirds-net = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
 forthebirds-runtime = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
 forthebirds-store = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
+forthebirds-sync = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs"] }
 url = { version = "2", features = ["serde"] }
 
 [lints.rust]
@@ -29,7 +33,7 @@ unsafe_code = "forbid"
 axum = "0.8"
 jsonschema = { version = "0.60.1", default-features = false }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 
 [patch.crates-io]
 rouchdb-adapter-redb = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
