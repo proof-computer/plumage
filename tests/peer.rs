@@ -5,9 +5,15 @@ use std::net::Ipv6Addr;
 use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
+use std::time::Duration;
 
-use forthebirds_net::StaticPeer;
+use forthebirds_net::{StaticPeer, pinned_client};
+use forthebirds_store::LedgerConfig;
+use forthebirds_sync::{CATCH_UP_PAGES, ROUTE};
+use plumage::actions::Action;
+use plumage::book::Book;
 use plumage::clock::DayClock;
+use plumage::colour::Colour;
 use plumage::config::PeerConfig;
 use plumage::day::Day;
 use plumage::fetch::{FetchError, Source};
@@ -49,11 +55,28 @@ fn day() -> Day {
 }
 
 fn clock() -> DayClock {
+    clock_at(2880)
+}
+
+fn clock_at(speed: u64) -> DayClock {
     DayClock {
         real_start_ms: wall_now(),
         sim_start_ms: day().open_ms(),
-        speed: 2880,
+        speed,
     }
+}
+
+fn shift(mut day: Day, steps: i32) -> Day {
+    if steps >= 0 {
+        for _ in 0..steps {
+            day = day.next();
+        }
+    } else {
+        for _ in 0..(-steps) {
+            day = day.previous();
+        }
+    }
+    day
 }
 
 fn peer_config(
@@ -279,4 +302,228 @@ async fn two_peers_replicate_votes_and_stay_undecided_on_a_tie() {
         .unwrap();
         assert_eq!(status["authors_seen"], json!(["p00", "p01"]));
     }
+}
+
+async fn until(label: &str, mut ready: impl FnMut() -> bool) {
+    let start = tokio::time::Instant::now();
+    while !ready() {
+        if start.elapsed() > Duration::from_secs(90) {
+            panic!("timed out waiting for {label}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn seed_votes(config: &PeerConfig, day: Day, count: usize) {
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let book = Book::open(LedgerConfig {
+        database_path: config.data_dir.join(format!("{day}.redb")),
+        database_cache_bytes: 1024 * 1024,
+        run_id: day.to_string(),
+        peer_id: config.peer_id.clone(),
+        token_budget: config.token_budget,
+        memory_budget: config.memory_budget,
+        memory_item_tokens: config.memory_item_tokens,
+        max_documents: plumage::config::MAX_DOCUMENTS,
+    })
+    .await
+    .unwrap();
+    for index in 0..count {
+        book.write(
+            &format!("s{index}"),
+            Action::Vote {
+                colour: Colour::Blue,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+fn read_json(path: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+async fn post_exchange(ad: &Path, run: &str) -> (u16, Value) {
+    let advertisement = read_json(ad);
+    let pin = advertisement["tlsFingerprint"].as_str().unwrap();
+    let port = advertisement["port"].as_u64().unwrap();
+    let client = pinned_client(pin, Duration::from_secs(5)).unwrap();
+    let response = client
+        .client
+        .post(format!("https://[::1]:{port}{ROUTE}"))
+        .bearer_auth(TOKEN)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(
+            serde_json::to_vec(&json!({
+                "protocol": 1,
+                "run_id": run,
+                "peer_id": "p01",
+                "records": [],
+                "since": 0,
+                "database_id": null
+            }))
+            .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_incoming_job_recomputes_yesterday_from_the_sibling_ledger() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let shared = clock_at(12_000);
+    let mut leader = peer_config(root.path(), "p00", &model, Vec::new(), shared);
+    leader.last_day = Some(shift(day(), 1));
+    let follower_peers = vec![StaticPeer {
+        name: "p00".to_owned(),
+        address: Ipv6Addr::LOCALHOST,
+        advertisement_file: root.path().join("p00.ad"),
+    }];
+    leader.peers = vec![StaticPeer {
+        name: "p01".to_owned(),
+        address: Ipv6Addr::LOCALHOST,
+        advertisement_file: root.path().join("p01.ad"),
+    }];
+    let (stop_leader, leader_rx) = watch::channel(false);
+    let leader_run = tokio::spawn(async move { peer::run(leader, EmptySource, leader_rx).await });
+    let closed = root.path().join(format!("p00-site/days/{DAY}.json"));
+    until("leader closes the first day", || closed.is_file()).await;
+
+    let mut follower = peer_config(root.path(), "p01", &model, follower_peers, shared);
+    follower.last_day = Some(shift(day(), 1));
+    let (stop_follower, follower_rx) = watch::channel(false);
+    let follower_run =
+        tokio::spawn(async move { peer::run(follower, EmptySource, follower_rx).await });
+    let copied = root.path().join(format!("p01-site/days/{DAY}.json"));
+    until("follower recomputes yesterday", || copied.is_file()).await;
+    assert_eq!(
+        std::fs::read(&copied).unwrap(),
+        std::fs::read(&closed).unwrap()
+    );
+
+    let leader_status = root.path().join("p00-site/status.json");
+    let follower_status = root.path().join("p01-site/status.json");
+    until("both peers paint yesterday", || {
+        let leader = read_json(&leader_status);
+        let follower = read_json(&follower_status);
+        leader["previous_day"]["day"] == DAY
+            && follower["previous_day"] == leader["previous_day"]
+            && follower["previous_day"]["paint"] != "no_record"
+    })
+    .await;
+    let archive = std::fs::read_to_string(root.path().join("p01-site/days/index.html")).unwrap();
+    assert!(archive.contains(&format!("href=\"{DAY}.html\"")));
+    assert!(!root.path().join("p01-site/days/2026-10-25.json").is_file());
+
+    drop(stop_leader);
+    drop(stop_follower);
+    leader_run.await.unwrap().unwrap();
+    follower_run.await.unwrap().unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_partial_closed_day_is_not_painted_until_catch_up() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let mut leader = peer_config(root.path(), "p00", &model, Vec::new(), clock_at(1));
+    leader.activation_interval_ms = plumage::config::MAX_ACTIVATION_INTERVAL_MS;
+    seed_votes(&leader, day(), CATCH_UP_PAGES * 16 + 1).await;
+    let shared = clock_at(4_000);
+    leader.clock = shared;
+    leader.last_day = None;
+
+    let (stop_leader, leader_rx) = watch::channel(false);
+    let leader_run = tokio::spawn(async move { peer::run(leader, EmptySource, leader_rx).await });
+    let closed = root.path().join(format!("p00-site/days/{DAY}.json"));
+    until("leader closes the seeded day", || closed.is_file()).await;
+
+    let mut follower = peer_config(
+        root.path(),
+        "p01",
+        &model,
+        vec![StaticPeer {
+            name: "p00".to_owned(),
+            address: Ipv6Addr::LOCALHOST,
+            advertisement_file: root.path().join("p00.ad"),
+        }],
+        shared,
+    );
+    follower.last_day = None;
+    follower.sync_interval_ms = 8_000;
+    follower.activation_interval_ms = plumage::config::MAX_ACTIVATION_INTERVAL_MS;
+    let (stop_follower, follower_rx) = watch::channel(false);
+    let follower_run =
+        tokio::spawn(async move { peer::run(follower, EmptySource, follower_rx).await });
+
+    let redb = root.path().join(format!("p01/{DAY}.redb"));
+    let started = tokio::time::Instant::now();
+    let mut imported = false;
+    while started.elapsed() < Duration::from_secs(30) {
+        if std::fs::metadata(&redb).map(|meta| meta.len()).unwrap_or(0) > 100_000 {
+            imported = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(imported, "the first tick did not import a partial ledger");
+    let copied = root.path().join(format!("p01-site/days/{DAY}.json"));
+    assert!(!copied.is_file(), "a partial day was painted");
+    let status = read_json(&root.path().join("p01-site/status.json"));
+    assert_eq!(status["previous_day"]["paint"], "no_record");
+
+    until("catch-up rewrites the closed day", || copied.is_file()).await;
+    assert_eq!(
+        std::fs::read(&copied).unwrap(),
+        std::fs::read(&closed).unwrap()
+    );
+
+    drop(stop_leader);
+    drop(stop_follower);
+    leader_run.await.unwrap().unwrap();
+    follower_run.await.unwrap().unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closed_days_older_than_seven_leave_the_sync_and_stay_on_disk() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let mut config = peer_config(root.path(), "p00", &model, Vec::new(), clock_at(50_000));
+    config.last_day = None;
+    config.activation_interval_ms = plumage::config::MAX_ACTIVATION_INTERVAL_MS;
+    let (stop, shutdown) = watch::channel(false);
+    let running = tokio::spawn(async move { peer::run(config, EmptySource, shutdown).await });
+
+    let held = shift(day(), 8);
+    let status_path = root.path().join("p00-site/status.json");
+    until("the peer reaches the eighth day ahead", || {
+        status_path.is_file() && read_json(&status_path)["day"] == held.to_string()
+    })
+    .await;
+
+    let ad = root.path().join("p00.ad");
+    until("the advertisement is published", || ad.is_file()).await;
+    let (gone, body) = post_exchange(&ad, &day().to_string()).await;
+    assert_eq!(gone, 409, "{body}");
+    assert_eq!(body["code"], "conflict");
+    let (kept, kept_body) = post_exchange(&ad, &held.to_string()).await;
+    assert_eq!(kept, 200, "{kept_body}");
+    assert!(root.path().join(format!("p00/{DAY}.redb")).is_file());
+    assert!(
+        root.path()
+            .join(format!("p00-site/days/{DAY}.json"))
+            .is_file()
+    );
+
+    drop(stop);
+    running.await.unwrap().unwrap();
+    server.abort();
 }

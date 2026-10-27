@@ -47,10 +47,13 @@ masthead, 24-colour band, white cards and freshness footer are the same on
 each page. What each existing page says is unchanged. The peer writes those
 pages and publishes `status.json` (`plumage.status.v1`), whose
 `fetch_failures_by_code` counts each failed fetch by its code since the
-process started. A peer runs whole days: `plumage peer <config.json>` opens one ledger
-per day, syncs with its static peers, activates on the day clock, and at the
-next day's open writes that day's result and repaints the site. `plumage lab`
-launches N of those peers as local processes on loopback, sharing one run
+process started. A peer runs whole days: `plumage peer <config.json>` keeps
+the open day's ledger and the last seven closed days on one sync route,
+activates on the day clock, and at the next day's open writes that day's
+result and repaints the site. A job that starts after midnight receives
+those ledgers from the job it overlaps and paints today from yesterday,
+recomputed with the published closing rule from the replicated votes.
+`plumage lab` launches N of those peers as local processes on loopback, sharing one run
 token and one day clock, against one llama-server. With no arguments the
 binary prints its version and the usage and exits.
 
