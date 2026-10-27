@@ -16,6 +16,15 @@ use crate::evidence::Evidence;
 use crate::fetch::{self, Source};
 use crate::prompt;
 
+/// One fetch that returned [`crate::fetch::FetchError`].
+///
+/// `host` is the URL host only. The path, query, message and body stay out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchFailure {
+    pub code: &'static str,
+    pub host: String,
+}
+
 /// The host `forthebirds_runtime` drives for one peer activation.
 pub struct PeerActivation<'a, S: Source> {
     book: &'a Book,
@@ -25,6 +34,7 @@ pub struct PeerActivation<'a, S: Source> {
     day: Day,
     clock: DayClock,
     completed_fetches: usize,
+    fetch_failures: &'a mut Vec<FetchFailure>,
 }
 
 impl<'a, S: Source> Activation for PeerActivation<'a, S> {
@@ -139,7 +149,14 @@ impl<'a, S: Source> PeerActivation<'a, S> {
         .await
         {
             Ok(evidence) => evidence,
-            Err(error) => return continue_with(json!({"error": error.code})),
+            Err(error) => {
+                // Beside the tool result. A validate refusal never reaches here.
+                self.fetch_failures.push(FetchFailure {
+                    code: error.code,
+                    host: url.host_str().unwrap_or("").to_owned(),
+                });
+                return continue_with(json!({"error": error.code}));
+            }
         };
         let evidence_id = fetched.id().0.clone();
         let excerpt = fetched.excerpt().to_owned();
@@ -180,6 +197,7 @@ pub async fn activate<S: Source>(
     clock: DayClock,
     limits: Limits,
     activation: &str,
+    fetch_failures: &mut Vec<FetchFailure>,
 ) -> Result<Colour> {
     let index = book.index();
     let context = prompt::context(&day, &clock, peer_id, &index, FETCHES_PER_ACTIVATION);
@@ -195,6 +213,7 @@ pub async fn activate<S: Source>(
         day,
         clock,
         completed_fetches: 0,
+        fetch_failures,
     };
     forthebirds_runtime::activation::run(
         model,
@@ -332,9 +351,49 @@ mod tests {
         }
     }
 
+    /// Allowlisted sunrise fails in the source; the wiki host still succeeds.
+    /// `actions::validate` never sees this `not_allowed`: the URL is permitted.
+    struct SunriseRefused {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Source for SunriseRefused {
+        fn get(
+            &self,
+            url: &Url,
+        ) -> impl Future<Output = std::result::Result<Vec<u8>, FetchError>> + Send {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let url = url.clone();
+            async move {
+                if url.host_str() == Some(crate::evidence::SUNRISE_HOST) {
+                    Err(FetchError {
+                        code: "not_allowed",
+                        message: format!("refused {url}"),
+                    })
+                } else if url.host_str() == Some(crate::evidence::WIKIMEDIA_HOST) {
+                    Ok(wiki_body())
+                } else {
+                    Err(FetchError {
+                        code: "not_allowed",
+                        message: format!("refused {url}"),
+                    })
+                }
+            }
+        }
+    }
+
+    fn failure_counts(failures: &[FetchFailure]) -> std::collections::BTreeMap<&str, u64> {
+        let mut counts = std::collections::BTreeMap::new();
+        for failure in failures {
+            *counts.entry(failure.code).or_default() += 1;
+        }
+        counts
+    }
+
     #[derive(Clone, Copy)]
     enum Script {
         FetchWiki,
+        FetchSunrise,
         ArgueLastEvidence,
         ArgueUnknown,
         Invalid,
@@ -392,6 +451,9 @@ mod tests {
         let step = fake.script.lock().unwrap().pop_front();
         let action = match step {
             Some(Script::FetchWiki) => json!({"action": "fetch", "url": fake.wiki_url}),
+            Some(Script::FetchSunrise) => {
+                json!({"action": "fetch", "url": fetch::sources(&day())[1].to_string()})
+            }
             Some(Script::ArgueLastEvidence) => {
                 let context = fake.last_context.lock().unwrap().clone();
                 let id = context
@@ -507,6 +569,7 @@ mod tests {
             clock(),
             limits(8),
             "act-1",
+            &mut Vec::new(),
         )
         .await
         .unwrap();
@@ -540,6 +603,7 @@ mod tests {
         ]);
         let (url, task) = serve(server.clone()).await;
         let model = model(&url);
+        let mut failures = Vec::new();
         activate(
             &book,
             &model,
@@ -549,10 +613,12 @@ mod tests {
             clock(),
             limits(8),
             "act-budget",
+            &mut failures,
         )
         .await
         .unwrap();
         task.abort();
+        assert!(failures.is_empty());
         assert_eq!(source.calls.load(Ordering::SeqCst), 3);
         assert_eq!(book.index().evidence.len(), 3);
         let requests = server.requests.lock().unwrap().clone();
@@ -584,6 +650,7 @@ mod tests {
             clock(),
             limits(8),
             "act-refuse",
+            &mut Vec::new(),
         )
         .await
         .unwrap();
@@ -616,6 +683,7 @@ mod tests {
             clock(),
             limits(2),
             "act-limit",
+            &mut Vec::new(),
         )
         .await
         .unwrap_err();
@@ -689,6 +757,7 @@ mod tests {
                 clock(),
                 limits(4),
                 "act-prompt",
+                &mut Vec::new(),
             )
             .await
             .unwrap();
@@ -719,5 +788,46 @@ mod tests {
         assert!(!prompts[0].0.contains("ARGUMENT-P01-VISIBLE"));
         assert!(!prompts[0].2.contains("EXCERPT-ONLY-P01-SHOULD-NOT-LEAK"));
         assert!(!prompts[0].0.contains("EXCERPT-ONLY-P01-SHOULD-NOT-LEAK"));
+    }
+
+    #[tokio::test]
+    async fn refused_allowlisted_fetch_is_counted_and_the_vote_still_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = open_book(dir.path(), "p00.redb", "p00").await;
+        let source = SunriseRefused {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let server = fake(vec![
+            Script::FetchSunrise,
+            Script::FetchWiki,
+            Script::VoteBlue,
+        ]);
+        let (url, task) = serve(server.clone()).await;
+        let model = model(&url);
+        let mut failures = Vec::new();
+        let colour = activate(
+            &book,
+            &model,
+            &source,
+            "p00",
+            day(),
+            clock(),
+            limits(8),
+            "act-fetch-fail",
+            &mut failures,
+        )
+        .await
+        .unwrap();
+        task.abort();
+        assert_eq!(colour, Colour::Blue);
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("not_allowed", 1);
+        assert_eq!(failure_counts(&failures), expected);
+        assert_eq!(failures[0].host, crate::evidence::SUNRISE_HOST);
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(book.index().evidence.len(), 1);
+        let requests = server.requests.lock().unwrap().clone();
+        let results = tool_results(&requests);
+        assert_eq!(results[0], r#"{"error":"not_allowed"}"#);
     }
 }

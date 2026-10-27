@@ -203,6 +203,7 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     assert!(status_bytes.len() <= 16_384);
     let status: Value = serde_json::from_slice(&status_bytes).unwrap();
     assert_eq!(status["schema"], "plumage.status.v1");
+    assert!(status["fetch_failures_by_code"].is_object());
     assert_eq!(status["phase"], "closed");
     assert_eq!(status["day"], DAY);
     assert_eq!(status["previous_day"]["paint"], "decided:blue");
