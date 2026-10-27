@@ -1,6 +1,7 @@
 //! Read-only site for the named tunnel. `GET` and `HEAD` only. No listing.
 
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -10,17 +11,38 @@ use tokio::net::TcpListener;
 
 use crate::error::{Error, Result};
 
+/// Open connections may finish during this window. It stays under the ten
+/// seconds the peer has to exit after SIGTERM.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(1);
+
 /// Serve files under `dir` until `shutdown` completes.
+///
+/// An incomplete request does not hold the server open. After shutdown, open
+/// connections get one second to finish, and then the server stops waiting
+/// for them.
 pub async fn run(
     dir: PathBuf,
     listener: TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let app = Router::new().fallback(handle).with_state(dir);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(|error| Error::new("io", error.to_string()))?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let shutdown = async move {
+        shutdown.await;
+        let _ = shutdown_tx.send(());
+    };
+    let drain = async {
+        if shutdown_rx.await.is_ok() {
+            tokio::time::sleep(SHUTDOWN_DRAIN).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        result = axum::serve(listener, app).with_graceful_shutdown(shutdown) => {
+            result.map_err(|error| Error::new("io", error.to_string()))?;
+        }
+        _ = drain => {}
+    }
     Ok(())
 }
 

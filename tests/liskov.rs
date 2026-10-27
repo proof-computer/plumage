@@ -1,7 +1,8 @@
 //! Offline Liskov mode: config, directory source, loopback exchange, the
 //! peer process, the site server and `plumage launch`.
 
-use std::net::TcpListener;
+use std::io::Write;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -384,6 +385,101 @@ async fn liskov_process_serves_status_then_exits_on_term() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incomplete_site_headers_do_not_hold_the_peer_past_term() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let site_port = free_port("127.0.0.1:0");
+    let sync_port = free_port("[::1]:0");
+    let config_path = root.path().join("peer.json");
+    let ready = root.path().join("ready");
+    let advert = root.path().join("advert.json");
+    let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/liskov-discovery-v2-directory.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "data_dir": root.path().join("data"),
+            "site_dir": root.path().join("site"),
+            "model_url": model,
+            "listen": format!("[::1]:{sync_port}"),
+            "clock": {"real_start_ms": 0, "sim_start_ms": 0, "speed": 1},
+            "last_day": null,
+            "fetch_timeout_seconds": 1,
+            "request_timeout_seconds": 1,
+            "inference_timeout_seconds": 5,
+            "liskov": {"site_listen": format!("127.0.0.1:{site_port}")}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plumage"))
+        .arg("peer")
+        .arg(&config_path)
+        .env("LISKOV_RUNTIME_INSTANCE_ID", "instance-a")
+        .env("LISKOV_PEER_ADVERTISEMENT_FILE", &advert)
+        .env("LISKOV_PEER_DIRECTORY_FILE", &directory)
+        .env("LISKOV_PLUMAGE_PEER_TOKEN", TOKEN)
+        .env("LISKOV_APPLICATION_READY_FILE", &ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let status_url = format!("http://127.0.0.1:{site_port}/status.json");
+    let started = Instant::now();
+    loop {
+        if started.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "peer did not become ready\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if ready.is_file()
+            && client
+                .get(&status_url)
+                .send()
+                .await
+                .ok()
+                .is_some_and(|response| response.status().as_u16() == 200)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mut held = TcpStream::connect(("127.0.0.1", site_port)).unwrap();
+    held.write_all(b"GET /status.json HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    held.flush().unwrap();
+
+    let killed = Instant::now();
+    let status = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    loop {
+        if let Some(code) = child.try_wait().unwrap() {
+            assert!(code.success(), "stderr after TERM: {code}");
+            assert!(killed.elapsed() < Duration::from_secs(10));
+            break;
+        }
+        if killed.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("peer did not exit within 10s of TERM while site headers were incomplete");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(held);
     server.abort();
 }
 
