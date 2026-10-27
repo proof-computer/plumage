@@ -13,6 +13,8 @@ use url::Url;
 pub const FETCHES_PER_ACTIVATION: usize = 3;
 pub const ARGUMENT_CHARS: usize = 400;
 pub const MAX_CITATIONS: usize = 8;
+/// An argument id: `r:a:` and 64 lowercase hex digits.
+const REPLY_TO_PATTERN: &str = "^r:a:[0-9a-f]{64}$";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -23,6 +25,10 @@ pub enum Action {
     Argue {
         text: String,
         cites: Vec<EvidenceId>,
+        /// One other author's argument in this run. Absent means the argument
+        /// answers nothing, and the field is omitted from its JSON.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
     },
     Vote {
         colour: Colour,
@@ -37,6 +43,10 @@ pub struct Context<'a> {
     pub run: &'a str,
     pub evidence: &'a [Evidence],
     pub fetches_this_activation: usize,
+    /// Argument ids in this run, each with the author who wrote it.
+    pub arguments: &'a [(String, String)],
+    /// Vote and evidence record ids in this run.
+    pub other_records: &'a [String],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +57,9 @@ pub enum Refusal {
     ForeignCitation,
     TextTooLong,
     TooManyCitations,
+    UnknownReply,
+    ReplyToNonArgument,
+    SelfReply,
 }
 
 pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
@@ -59,7 +72,11 @@ pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
                 return Err(Refusal::BudgetExhausted);
             }
         }
-        Action::Argue { text, cites } => {
+        Action::Argue {
+            text,
+            cites,
+            reply_to,
+        } => {
             if text.chars().count() > ARGUMENT_CHARS {
                 return Err(Refusal::TextTooLong);
             }
@@ -74,6 +91,19 @@ pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
                     .ok_or(Refusal::UnknownCitation)?;
                 if evidence.author() != context.author {
                     return Err(Refusal::ForeignCitation);
+                }
+            }
+            if let Some(target) = reply_to {
+                let known_argument = context.arguments.iter().find(|(id, _)| id == target);
+                let known_other = context.other_records.iter().any(|id| id == target);
+                if known_argument.is_none() && !known_other {
+                    return Err(Refusal::UnknownReply);
+                }
+                if known_argument.is_none() {
+                    return Err(Refusal::ReplyToNonArgument);
+                }
+                if known_argument.is_some_and(|(_, author)| author == context.author) {
+                    return Err(Refusal::SelfReply);
                 }
             }
         }
@@ -95,7 +125,8 @@ pub fn schema() -> Value {
              "properties": {"action": {"const": "argue"},
                  "text": {"type": "string", "maxLength": ARGUMENT_CHARS},
                  "cites": {"type": "array", "maxItems": MAX_CITATIONS,
-                           "items": {"type": "string"}}}},
+                           "items": {"type": "string"}},
+                 "reply_to": {"type": "string", "pattern": REPLY_TO_PATTERN}}},
             {"type": "object", "additionalProperties": false,
              "required": ["action", "colour"],
              "properties": {"action": {"const": "vote"},
@@ -128,6 +159,8 @@ mod tests {
             run: "today",
             evidence,
             fetches_this_activation: fetches,
+            arguments: &[],
+            other_records: &[],
         }
     }
 
@@ -135,7 +168,12 @@ mod tests {
         Action::Argue {
             text: text.into(),
             cites,
+            reply_to: None,
         }
+    }
+
+    fn argument_id(seed: &str) -> String {
+        format!("r:a:{seed}")
     }
 
     #[test]
@@ -280,6 +318,127 @@ mod tests {
         ] {
             assert!(!validator.is_valid(&value), "{value}");
         }
+
+        let bare = argue("blue", vec![]);
+        let bare_value = serde_json::to_value(&bare).unwrap();
+        assert_eq!(
+            bare_value,
+            json!({"action": "argue", "text": "blue", "cites": []})
+        );
+        assert!(bare_value.get("reply_to").is_none());
+        let other = argument_id(&"ab".repeat(32));
+        let reply = Action::Argue {
+            text: "blue".into(),
+            cites: vec![],
+            reply_to: Some(other.clone()),
+        };
+        let reply_value = serde_json::to_value(&reply).unwrap();
+        assert_eq!(reply_value["reply_to"], other);
+        assert_eq!(
+            serde_json::from_value::<Action>(reply_value).unwrap(),
+            reply
+        );
+        assert!(
+            validator.is_valid(
+                &json!({"action": "argue", "text": "blue", "cites": [], "reply_to": other})
+            )
+        );
+        assert!(validator.is_valid(&json!({"action": "argue", "text": "blue", "cites": []})));
+        for reply_to in [
+            format!("r:e:{}", "ab".repeat(32)),
+            format!("r:a:{}", "a".repeat(63)),
+            format!("r:a:{}", "AB".repeat(32)),
+        ] {
+            let value =
+                json!({"action": "argue", "text": "blue", "cites": [], "reply_to": reply_to});
+            assert!(!validator.is_valid(&value), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_reply_names_another_authors_argument_in_this_run() {
+        let other = argument_id(&"ab".repeat(32));
+        let own = argument_id(&"cd".repeat(32));
+        let vote = argument_id(&"ef".repeat(32));
+        let evidence_id = format!("r:e:{}", "12".repeat(32));
+        let arguments = [(other.clone(), "b".into()), (own.clone(), "a".into())];
+        let other_records = [vote.clone(), evidence_id.clone()];
+        let ctx = Context {
+            author: "a",
+            run: "today",
+            evidence: &[],
+            fetches_this_activation: 0,
+            arguments: &arguments,
+            other_records: &other_records,
+        };
+        assert_eq!(
+            validate(
+                &Action::Argue {
+                    text: "yes".into(),
+                    cites: vec![],
+                    reply_to: Some(other.clone()),
+                },
+                &ctx
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate(
+                &Action::Argue {
+                    text: "yes".into(),
+                    cites: vec![],
+                    reply_to: Some(argument_id(&"99".repeat(32))),
+                },
+                &ctx
+            ),
+            Err(Refusal::UnknownReply)
+        );
+        for id in [vote, evidence_id] {
+            assert_eq!(
+                validate(
+                    &Action::Argue {
+                        text: "yes".into(),
+                        cites: vec![],
+                        reply_to: Some(id),
+                    },
+                    &ctx
+                ),
+                Err(Refusal::ReplyToNonArgument)
+            );
+        }
+        assert_eq!(
+            validate(
+                &Action::Argue {
+                    text: "yes".into(),
+                    cites: vec![],
+                    reply_to: Some(own),
+                },
+                &ctx
+            ),
+            Err(Refusal::SelfReply)
+        );
+        let records = [Evidence::new(
+            "b".into(),
+            "today".into(),
+            Url::parse(WIKI).unwrap(),
+            0,
+            "fact",
+        )];
+        let foreign = Context {
+            evidence: &records,
+            ..ctx
+        };
+        assert_eq!(
+            validate(
+                &Action::Argue {
+                    text: "yes".into(),
+                    cites: vec![records[0].id().clone()],
+                    reply_to: Some(other),
+                },
+                &foreign
+            ),
+            Err(Refusal::ForeignCitation)
+        );
     }
 
     #[test]

@@ -109,11 +109,14 @@ impl<'a, S: Source> Activation for PeerActivation<'a, S> {
         };
         let run = self.book.ledger().config.run_id.clone();
         let own = own_evidence(self.book, self.peer_id, &run);
+        let (arguments, other_records) = self.book.index().reply_records();
         let check = actions::Context {
             author: self.peer_id,
             run: &run,
             evidence: &own,
             fetches_this_activation: self.completed_fetches,
+            arguments: &arguments,
+            other_records: &other_records,
         };
         if let Err(refusal) = actions::validate(&action, &check) {
             return continue_with(json!({"refused": format!("{refusal:?}")}));
@@ -396,6 +399,8 @@ mod tests {
         FetchSunrise,
         ArgueLastEvidence,
         ArgueUnknown,
+        ArgueReply,
+        ArgueUnknownReply,
         Invalid,
         VoteBlue,
     }
@@ -467,6 +472,20 @@ mod tests {
             }
             Some(Script::ArgueUnknown) => {
                 json!({"action": "argue", "text": "citing nothing I fetched", "cites": ["unknown-evidence-id"]})
+            }
+            Some(Script::ArgueReply) => {
+                let context = fake.last_context.lock().unwrap().clone();
+                let id = context
+                    .pointer("/arguments")
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.last())
+                    .and_then(|item| item["id"].as_str())
+                    .unwrap_or("r:a:missing")
+                    .to_owned();
+                json!({"action": "argue", "text": "answering that", "cites": [], "reply_to": id})
+            }
+            Some(Script::ArgueUnknownReply) => {
+                json!({"action": "argue", "text": "answering nobody", "cites": [], "reply_to": format!("r:a:{}", "ab".repeat(32))})
             }
             Some(Script::Invalid) => json!({"action": "name"}),
             Some(Script::VoteBlue) => json!({"action": "vote", "colour": "blue"}),
@@ -665,6 +684,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reply_to_a_peers_argument_posts_and_an_unknown_reply_continues_to_vote() {
+        let dir = tempfile::tempdir().unwrap();
+        let author = open_book(dir.path(), "p01.redb", "p01").await;
+        let evidence = Evidence::new(
+            "p01".into(),
+            "run-1".into(),
+            fetch::sources(&day())[0].clone(),
+            day().open_ms(),
+            "a fact",
+        );
+        let evidence_id = evidence.id().clone();
+        author.save_evidence(evidence).await.unwrap();
+        let target = author
+            .write(
+                "argue-1",
+                Action::Argue {
+                    text: "the day is blue".into(),
+                    cites: vec![evidence_id],
+                    reply_to: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let page = author.ledger().page(None, 16).await.unwrap();
+        let mut evidence_records = Vec::new();
+        let mut action_records = Vec::new();
+        for record in page.records {
+            match record {
+                Record::Evidence(record) => evidence_records.push(Record::Evidence(record)),
+                Record::Action(record) => action_records.push(Record::Action(record)),
+            }
+        }
+        let reader = open_book(dir.path(), "p00.redb", "p00").await;
+        reader
+            .ledger()
+            .import(&reader, evidence_records)
+            .await
+            .unwrap();
+        reader
+            .ledger()
+            .import(&reader, action_records)
+            .await
+            .unwrap();
+
+        let source = FixedSource {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let server = fake(vec![Script::ArgueReply, Script::VoteBlue]);
+        let (url, task) = serve(server.clone()).await;
+        let reply_model = model(&url);
+        let colour = activate(
+            &reader,
+            &reply_model,
+            &source,
+            "p00",
+            day(),
+            clock(),
+            limits(8),
+            "act-reply",
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        task.abort();
+        assert_eq!(colour, Colour::Blue);
+        let posted = reader
+            .index()
+            .arguments
+            .into_iter()
+            .find(|argument| argument.author == "p00")
+            .unwrap();
+        assert_eq!(posted.text, "answering that");
+        assert_eq!(posted.reply_to.as_deref(), Some(target.id.as_str()));
+
+        let fresh = tempfile::tempdir().unwrap();
+        let book = open_book(fresh.path(), "p00.redb", "p00").await;
+        let server = fake(vec![Script::ArgueUnknownReply, Script::VoteBlue]);
+        let (url, task) = serve(server.clone()).await;
+        let unknown_model = model(&url);
+        let colour = activate(
+            &book,
+            &unknown_model,
+            &source,
+            "p00",
+            day(),
+            clock(),
+            limits(8),
+            "act-unknown-reply",
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        task.abort();
+        assert_eq!(colour, Colour::Blue);
+        assert!(book.index().arguments.is_empty());
+        assert_eq!(book.index().votes.len(), 1);
+        let requests = server.requests.lock().unwrap().clone();
+        let results = tool_results(&requests);
+        assert_eq!(results[0], r#"{"refused":"UnknownReply"}"#);
+    }
+
+    #[tokio::test]
     async fn no_vote_within_max_steps_is_tool_limit_and_records_remain() {
         let dir = tempfile::tempdir().unwrap();
         let book = open_book(dir.path(), "p00.redb", "p00").await;
@@ -714,6 +836,7 @@ mod tests {
                 Action::Argue {
                     text: "ARGUMENT-P01-VISIBLE".into(),
                     cites: vec![evidence_id],
+                    reply_to: None,
                 },
                 1,
             )

@@ -6,6 +6,8 @@ use forthebirds_store::{ActionRecord, AppAction, EvidenceRecord, LedgerRecord, c
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA: u32 = 1;
+/// An argue that names `reply_to`. Every other record stays at [`SCHEMA`].
+pub const REPLY_SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(
@@ -70,7 +72,11 @@ impl AppAction for Action {
                     ));
                 }
             }
-            Action::Argue { text, cites } => {
+            Action::Argue {
+                text,
+                cites,
+                reply_to,
+            } => {
                 if text.chars().count() > ARGUMENT_CHARS {
                     return Err(forthebirds_store::Error::new(
                         "invalid_action",
@@ -87,6 +93,14 @@ impl AppAction for Action {
                     return Err(forthebirds_store::Error::new(
                         "invalid_action",
                         "citation must be 64 lowercase hex digits",
+                    ));
+                }
+                if let Some(target) = reply_to
+                    && !is_argument_id(target)
+                {
+                    return Err(forthebirds_store::Error::new(
+                        "invalid_action",
+                        "reply_to must be r:a: and 64 lowercase hex digits",
                     ));
                 }
             }
@@ -117,7 +131,7 @@ impl AppAction for Action {
 
 impl LedgerRecord for Record {
     const APP: &'static str = "plumage";
-    const MAX_KNOWN_SCHEMA: u32 = 1;
+    const MAX_KNOWN_SCHEMA: u32 = 2;
 
     fn id(&self) -> &str {
         match self {
@@ -142,11 +156,22 @@ impl LedgerRecord for Record {
 
     fn validate(&self, run: &str) -> forthebirds_store::Result<()> {
         check_record(self)?;
-        if self.schema() != SCHEMA {
-            return Err(forthebirds_store::Error::new("invalid", "schema is not 1"));
-        }
         match self {
             Self::Action(record) => {
+                let reply = matches!(
+                    &record.action,
+                    Action::Argue {
+                        reply_to: Some(_),
+                        ..
+                    }
+                );
+                let expected = if reply { REPLY_SCHEMA } else { SCHEMA };
+                if record.schema != expected {
+                    return Err(forthebirds_store::Error::new(
+                        "invalid",
+                        "schema does not match the record",
+                    ));
+                }
                 record.validate_envelope(run)?;
                 if matches!(record.action, Action::Fetch { .. }) {
                     return Err(forthebirds_store::Error::new(
@@ -157,6 +182,12 @@ impl LedgerRecord for Record {
                 Ok(())
             }
             Self::Evidence(record) => {
+                if record.schema != SCHEMA {
+                    return Err(forthebirds_store::Error::new(
+                        "invalid",
+                        "schema does not match the record",
+                    ));
+                }
                 record.validate_envelope(run)?;
                 if record.evidence.run() != record.run_id
                     || record.evidence.author() != record.observed_by
@@ -192,6 +223,11 @@ impl LedgerRecord for Record {
     }
 }
 
+fn is_argument_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 68 && id.starts_with("r:a:") && bytes[4..].iter().copied().all(is_hex_byte)
+}
+
 fn is_lower_hex(value: &str, len: usize) -> bool {
     value.len() == len && value.bytes().all(is_hex_byte)
 }
@@ -204,8 +240,8 @@ fn is_hex_byte(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::colour::Colour;
-    use forthebirds_store::{ChangesPage, LedgerRecord};
-    use serde_json::json;
+    use forthebirds_store::{ChangesPage, LedgerRecord, action_id};
+    use serde_json::{Value, json};
 
     fn vote_record() -> Record {
         Record::Action(ActionRecord {
@@ -231,7 +267,7 @@ mod tests {
         assert_eq!(good["kind"], "action");
         assert!(good["data"].is_object());
         assert_eq!(good["data"]["schema"], 1);
-        let skipped = json!({"kind": "evidence", "data": {"schema": 2}});
+        let skipped = json!({"kind": "evidence", "data": {"schema": 3}});
         let page = json!({
             "database_id": "db-1",
             "records": [good, skipped],
@@ -242,5 +278,109 @@ mod tests {
         assert_eq!(decoded.records.len(), 1);
         assert_eq!(decoded.records[0].id(), record.id());
         assert!(decoded.records[0].id().starts_with("r:a:"));
+    }
+
+    fn argue_record(schema: u32, reply_to: Option<String>) -> Record {
+        let run = "run-1";
+        let author = "peer-a";
+        let operation = "argue-1";
+        Record::Action(ActionRecord {
+            id: action_id(run, author, operation),
+            schema,
+            run_id: run.into(),
+            author: author.into(),
+            operation_id: operation.into(),
+            author_sequence: 1,
+            created_at_ms: 5,
+            action: Action::Argue {
+                text: "blue".into(),
+                cites: vec![],
+                reply_to,
+            },
+            memory_tokens: 1,
+            memory_remaining: 99,
+        })
+    }
+
+    /// A peer whose `MAX_KNOWN_SCHEMA` is still 1. `decode_page` skips a reply
+    /// before this type has to understand it.
+    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+    struct OldPeer {
+        data: Value,
+    }
+
+    impl LedgerRecord for OldPeer {
+        const APP: &'static str = "plumage";
+        const MAX_KNOWN_SCHEMA: u32 = 1;
+
+        fn id(&self) -> &str {
+            self.data
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        }
+
+        fn author(&self) -> &str {
+            ""
+        }
+
+        fn schema(&self) -> u32 {
+            self.data.get("schema").and_then(Value::as_u64).unwrap_or(0) as u32
+        }
+
+        fn validate(&self, _run: &str) -> forthebirds_store::Result<()> {
+            Ok(())
+        }
+
+        fn check_id(_id: &str) -> forthebirds_store::Result<()> {
+            Ok(())
+        }
+
+        fn receipt(&self) -> Option<(u64, u64)> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_reply_is_schema_2_and_an_old_peer_skips_it() {
+        let target = format!("r:a:{}", "cd".repeat(32));
+        let reply = argue_record(REPLY_SCHEMA, Some(target));
+        assert_eq!(reply.schema(), REPLY_SCHEMA);
+        reply.validate("run-1").unwrap();
+
+        let at_one = argue_record(SCHEMA, Some(format!("r:a:{}", "cd".repeat(32))));
+        assert_eq!(at_one.validate("run-1").unwrap_err().code, "invalid");
+
+        let vote_at_two = {
+            let mut vote = vote_record();
+            match &mut vote {
+                Record::Action(record) => record.schema = REPLY_SCHEMA,
+                Record::Evidence(_) => unreachable!(),
+            }
+            vote
+        };
+        assert_eq!(vote_at_two.validate("run-1").unwrap_err().code, "invalid");
+
+        let malformed = argue_record(REPLY_SCHEMA, Some(format!("r:e:{}", "ab".repeat(32))));
+        assert_eq!(
+            malformed.validate("run-1").unwrap_err().code,
+            "invalid_action"
+        );
+
+        let kept = vote_record();
+        let page = json!({
+            "database_id": "db-1",
+            "records": [
+                serde_json::to_value(&kept).unwrap(),
+                serde_json::to_value(&reply).unwrap(),
+            ],
+            "last_seq": 2,
+            "has_more": false,
+        });
+        let current: ChangesPage<Record> = serde_json::from_value(page.clone()).unwrap();
+        assert_eq!(current.records.len(), 2);
+        let old: ChangesPage<OldPeer> = serde_json::from_value(page).unwrap();
+        assert_eq!(old.records.len(), 1);
+        assert_eq!(old.records[0].id(), kept.id());
     }
 }

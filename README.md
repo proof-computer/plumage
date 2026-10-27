@@ -36,9 +36,10 @@ schema and validation. Fetch intents permit only the Wikimedia on-this-day
 feed and London's sunrise/sunset JSON API, with three fetches per activation.
 Evidence retains a SHA-256 digest and at most 600 characters; arguments are
 limited to 400 characters and eight citations fetched by their author in the
-same run. Records and the citation rule are enforced on the store: a fetch is
+same run. An argument may also name one other author's argument it answers.
+Records and the citation rule are enforced on the store: a fetch is
 stored as evidence, and an argument is written or imported only when its
-citations pass that rule. Peer-id SHA-256 hashes seed the initial event
+citations pass that rule and, when it names one, the argument it answers. Peer-id SHA-256 hashes seed the initial event
 offset. The fetch executor exists for the two sources and stores bounded
 evidence. The site renders from votes, arguments and evidence as exact counts
 with the published formulas. Every page shares one shell: the decided colour is the page ground,
@@ -130,6 +131,7 @@ internet. Every page shows its records' freshness.
   personality; each can afford only a few fetches, seeded differently.
 - Fetched text is bounded, allowlisted evidence with a URL and digest. A vote
   or argument may cite only evidence its author fetched in this run.
+- A reply names one other author's argument. It is not a citation.
 - The only text one peer can put in another's prompt is a bounded typed field
   rendered as data.
 - Rust groups current votes by colour, counts replies that cite another
