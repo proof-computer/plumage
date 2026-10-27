@@ -92,6 +92,34 @@ plumage lab --dir <dir> --peers 12 --model-url http://127.0.0.1:8080/ [--day …
 
 Open `<dir>/p00/site/index.html`.
 
+## Running on Liskov
+
+On a phone, the Cargo harness starts the peer. `plumage launch` calls that
+harness and returns. It does not write `peer.json`, watch the peer, or start
+it again. A peer that exits ends the deployment.
+
+`plumage peer` with a `liskov` block reads its identity from the runtime.
+`peer_id`, `token` and `advertisement_file` are empty in the published file,
+and so is `peers`. The peer fills them from `LISKOV_RUNTIME_INSTANCE_ID`,
+`LISKOV_PLUMAGE_PEER_TOKEN` and `LISKOV_PEER_ADVERTISEMENT_FILE`. The token is
+32–256 visible ASCII bytes. Every other `LISKOV_PLUMAGE_…` name comes from the
+harness. The unprefixed names are `LISKOV_RUNTIME_INSTANCE_ID`,
+`LISKOV_PEER_ADVERTISEMENT_FILE`, `LISKOV_PEER_DIRECTORY_FILE` and
+`LISKOV_APPLICATION_READY_FILE`.
+
+Each sync tick re-reads the helper directory, at most once a second, and keeps
+only entries for the `plumage` service. The site is served read-only on
+`liskov.site_listen` (IPv4 loopback). `index.html` and `status.json` are
+`Cache-Control: no-store`. When `status.json` answers and the advertisement
+file exists, the peer writes the readiness file. `SIGINT` or `SIGTERM` stops
+the peer, the connector and the server, and exits 0.
+
+The published `peer.json` names `listen` `[::]:8841`, `model_url`
+`http://127.0.0.1:8081/`, `data_dir` `state/data`, `site_dir` `state/site`,
+a real-time clock and `liskov.site_listen` `127.0.0.1:8840`. The harness
+descriptor `deployment.json` points `peer_config` at that file and reserves
+ports 8840 and 8841. Packaging that descriptor is a later packet.
+
 The lab's day starts at the open of `--day` when launched and runs
 `24 h / speed` of wall time. Peers fetch the two allowlisted sources over the
 internet. Every page shows its records' freshness.

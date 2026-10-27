@@ -12,7 +12,13 @@ documentation and delivery; this file governs local conventions.
   declared here.
 - `src/main.rs`: the entrypoint. Keep it small as functionality lands in
   focused modules.
+- `src/launch.rs`: `plumage launch`, the harness call. It does not supervise the peer.
+- `src/liskov.rs`: Liskov-mode composition. The peer reads the helper directory,
+  serves the site and reports readiness. It does not restart.
+- `src/serve.rs`: the read-only site server.
 - `src/lab.rs` and `tests/lab.rs`: the workstation lab and its offline whole-day test.
+- `tests/liskov.rs`: the offline Liskov-mode tests. `tests/fixtures/` holds the
+  helper directory files.
 - `rust-toolchain.toml`: the pinned development and CI toolchain.
 - `.github/workflows/ci.yml`: the local checks repeated on GitHub, on x86_64
   and native AArch64.

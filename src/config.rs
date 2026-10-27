@@ -33,14 +33,22 @@ pub const MAX_DOCUMENTS: usize = 10_000_000;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerConfig {
+    /// Empty in a published Liskov payload. `liskov::apply` fills it.
+    #[serde(default)]
     pub peer_id: String,
     pub data_dir: PathBuf,
     pub site_dir: PathBuf,
     pub model_url: String,
     #[serde(deserialize_with = "de_socket", serialize_with = "ser_socket")]
     pub listen: SocketAddr,
+    /// Empty in a published Liskov payload. `liskov::apply` fills it.
+    #[serde(default)]
     pub advertisement_file: PathBuf,
+    /// Empty in a published Liskov payload. The directory supplies targets.
+    #[serde(default)]
     pub peers: Vec<StaticPeer>,
+    /// Empty in a published Liskov payload. The peer reads it from the environment.
+    #[serde(default)]
     pub token: String,
     pub clock: DayClock,
     pub last_day: Option<Day>,
@@ -66,6 +74,21 @@ pub struct PeerConfig {
     pub memory_budget: u64,
     #[serde(default = "default_memory_item_tokens")]
     pub memory_item_tokens: u64,
+    /// Present only when this peer is a Liskov job. The payload carries no credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liskov: Option<LiskovConfig>,
+}
+
+/// Loopback site listener and optional named-tunnel connector.
+///
+/// `peer_id`, `token`, `advertisement_file` and `peers` stay empty in the file.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiskovConfig {
+    #[serde(deserialize_with = "de_socket", serialize_with = "ser_socket")]
+    pub site_listen: SocketAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflared: Option<liskov_cargo_harness::cloudflared::CloudflaredConfig>,
 }
 
 fn default_activation_interval_ms() -> u64 {
@@ -125,6 +148,23 @@ fn ser_socket<S: Serializer>(
 impl PeerConfig {
     /// Code `config` when an identity, address, token, clock or bound is refused.
     pub fn validate(&self) -> Result<()> {
+        if let Some(liskov) = &self.liskov {
+            let address = liskov.site_listen;
+            if !address.ip().is_ipv4() || !address.ip().is_loopback() || address.port() == 0 {
+                return Err(Error::new(
+                    "config",
+                    "liskov.site_listen must be a non-zero IPv4 loopback address",
+                ));
+            }
+        } else if self.peer_id.is_empty()
+            || self.token.is_empty()
+            || self.advertisement_file.as_os_str().is_empty()
+        {
+            return Err(Error::new(
+                "config",
+                "peer_id, token and advertisement_file are required",
+            ));
+        }
         forthebirds_store::identifier(&self.peer_id).map_err(|_| {
             Error::new(
                 "config",
@@ -137,12 +177,17 @@ impl PeerConfig {
                 "listen must be an IPv6 socket address",
             ));
         }
-        if !(32..=512).contains(&self.token.len())
+        let (lower, upper, bound) = if self.liskov.is_some() {
+            (32, 256, "32–256")
+        } else {
+            (32, 512, "32–512")
+        };
+        if !(lower..=upper).contains(&self.token.len())
             || !self.token.bytes().all(|byte| byte.is_ascii_graphic())
         {
             return Err(Error::new(
                 "config",
-                "token must be 32–512 visible ASCII bytes",
+                format!("token must be {bound} visible ASCII bytes"),
             ));
         }
         self.clock.validate()?;
