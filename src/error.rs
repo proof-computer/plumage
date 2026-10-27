@@ -1,4 +1,4 @@
-//! Failures from the store, a fetch, or plumage's own record rules.
+//! Failures from the store, inference, a fetch, or plumage's own record rules.
 
 use crate::fetch::FetchError;
 use serde::Serialize;
@@ -40,6 +40,15 @@ impl From<forthebirds_store::Error> for Error {
 
 impl From<FetchError> for Error {
     fn from(error: FetchError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}
+
+impl From<forthebirds_inference::Error> for Error {
+    fn from(error: forthebirds_inference::Error) -> Self {
         Self {
             code: error.code,
             message: error.message,

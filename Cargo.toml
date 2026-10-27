@@ -13,6 +13,8 @@ name = "plumage"
 path = "src/main.rs"
 
 [dependencies]
+forthebirds-inference = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
+forthebirds-runtime = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
 forthebirds-store = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,9 +26,10 @@ url = { version = "2", features = ["serde"] }
 unsafe_code = "forbid"
 
 [dev-dependencies]
+axum = "0.8"
 jsonschema = { version = "0.60.1", default-features = false }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 
 [patch.crates-io]
 rouchdb-adapter-redb = { git = "https://github.com/proof-computer/forthebirds", rev = "0b3196a5c968bfe6500cfe92c7dcef54a1143e94" }

@@ -46,6 +46,7 @@ Bricolage Grotesque and IBM Plex Mono are served beside the pages, and the
 masthead, 24-colour band, white cards and freshness footer are the same on
 each page. What each existing page says is unchanged. The peer writes those
 pages in a later packet. The binary still prints its version and exits.
+A peer activation runs against a model; the peer process is next.
 
 ## Rules the swarm keeps
 
