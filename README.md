@@ -47,8 +47,10 @@ masthead, 24-colour band, white cards and freshness footer are the same on
 each page. What each existing page says is unchanged. The peer writes those
 pages. A peer runs whole days: `plumage peer <config.json>` opens one ledger
 per day, syncs with its static peers, activates on the day clock, and at the
-next day's open writes that day's result and repaints the site. With no
-arguments the binary prints its version and the usage and exits.
+next day's open writes that day's result and repaints the site. `plumage lab`
+launches N of those peers as local processes on loopback, sharing one run
+token and one day clock, against one llama-server. With no arguments the
+binary prints its version and the usage and exits.
 
 ## Running a peer
 
@@ -72,6 +74,22 @@ context tokens, 512 output tokens, and a memory budget of 1 000 000.
   "last_day": null
 }
 ```
+
+## Running the lab
+
+The lab is a run on the owner's GPU workstation. It does not start
+llama-server. Start one llama-server with a 4B-class model and one slot per
+peer (`--parallel <N>`, context `4096 × N`), then:
+
+```sh
+plumage lab --dir <dir> --peers 12 --model-url http://127.0.0.1:8080/ [--day …] [--speed …]
+```
+
+Open `<dir>/p00/site/index.html`.
+
+The lab's day starts at the open of `--day` when launched and runs
+`24 h / speed` of wall time. Peers fetch the two allowlisted sources over the
+internet. Every page shows its records' freshness.
 
 ## Rules the swarm keeps
 

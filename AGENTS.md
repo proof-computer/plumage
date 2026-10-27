@@ -12,6 +12,7 @@ documentation and delivery; this file governs local conventions.
   declared here.
 - `src/main.rs`: the entrypoint. Keep it small as functionality lands in
   focused modules.
+- `src/lab.rs` and `tests/lab.rs`: the workstation lab and its offline whole-day test.
 - `rust-toolchain.toml`: the pinned development and CI toolchain.
 - `.github/workflows/ci.yml`: the local checks repeated on GitHub, on x86_64
   and native AArch64.
