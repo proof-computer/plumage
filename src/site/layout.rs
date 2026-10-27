@@ -3,18 +3,10 @@
 //! `@font-face` uses the CSS descriptor `src:`. The site test forbids the HTML
 //! attribute `src=`, which this string does not contain.
 
-use std::collections::BTreeMap;
-
-use crate::closing::{LIVE_RULE, Vote, live_voters};
 use crate::colour::Colour;
 use crate::day::{Day, utc_time};
-use crate::evidence::Evidence;
-use crate::tally::{
-    COUNTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, counts, current_votes,
-    fetches, vote_changes,
-};
 
-use super::{ArgumentView, Chrome, DayPage, Paint, Section};
+use super::{Chrome, Paint, Section};
 
 const FACES: &[(&str, &str, &str)] = &[
     (
@@ -160,127 +152,6 @@ pub(crate) fn push_escaped(out: &mut String, text: &str) {
             other => out.push(other),
         }
     }
-}
-
-pub(crate) fn push_current(out: &mut String, page: &DayPage<'_>) {
-    let current = current_votes(page.votes, page.chrome.as_of_ms);
-    let totals = counts(page.votes, page.chrome.as_of_ms);
-    let mut grouped: BTreeMap<Colour, Vec<&str>> = BTreeMap::new();
-    for (author, colour) in &current {
-        grouped.entry(*colour).or_default().push(author);
-    }
-    let mut body = String::from("<p>");
-    body.push_str(CURRENT_VOTES_RULE);
-    body.push_str("</p>\n<p>");
-    body.push_str(COUNTS_RULE);
-    body.push_str("</p>\n");
-    for (colour, authors) in grouped {
-        body.push_str("<h3>");
-        push_escaped(&mut body, colour.name());
-        body.push_str("</h3>\n<p>");
-        body.push_str(&totals.get(&colour).copied().unwrap_or(0).to_string());
-        body.push_str("</p>\n<ul>\n");
-        for author in authors {
-            body.push_str("<li>");
-            body.push_str(&peer(&page.chrome, author));
-            body.push_str("</li>\n");
-        }
-        body.push_str("</ul>\n");
-    }
-    out.push_str(&card("Current votes", &body));
-}
-
-pub(crate) fn push_live(out: &mut String, page: &DayPage<'_>) {
-    let live = live_voters(page.votes, page.day.open_ms(), page.day.close_ms());
-    let mut body = String::from("<p>");
-    body.push_str(LIVE_RULE);
-    body.push_str("</p>\n<p>Threshold: &gt; ");
-    body.push_str(&live.len().to_string());
-    body.push_str(" / 2</p>\n<ul>\n");
-    for author in &live {
-        body.push_str("<li>");
-        body.push_str(&peer(&page.chrome, author));
-        body.push_str("</li>\n");
-    }
-    body.push_str("</ul>\n");
-    out.push_str(&card("Live voters", &body));
-}
-
-pub(crate) fn push_changes(out: &mut String, votes: &[Vote], chrome: &Chrome<'_>) {
-    push_author_counts(
-        out,
-        "Vote changes",
-        VOTE_CHANGES_RULE,
-        &vote_changes(votes),
-        chrome,
-    );
-}
-
-pub(crate) fn push_fetches(out: &mut String, evidence: &[Evidence], chrome: &Chrome<'_>) {
-    push_author_counts(out, "Fetches", FETCHES_RULE, &fetches(evidence), chrome);
-}
-
-pub(crate) fn push_arguments(out: &mut String, arguments: &[ArgumentView], chrome: &Chrome<'_>) {
-    let mut ordered: Vec<&ArgumentView> = arguments.iter().collect();
-    ordered.sort_by(|left, right| {
-        (left.at_ms, left.author.as_str(), left.id.as_str()).cmp(&(
-            right.at_ms,
-            right.author.as_str(),
-            right.id.as_str(),
-        ))
-    });
-    let mut body = String::new();
-    for argument in ordered {
-        body.push_str("<article>\n<p>");
-        body.push_str(&format!(
-            "{} {} UTC",
-            Day::from_ms(argument.at_ms),
-            utc_time(argument.at_ms)
-        ));
-        body.push_str("</p>\n<p>");
-        body.push_str(&peer(chrome, &argument.author));
-        body.push_str("</p>\n<p>");
-        push_escaped(&mut body, &argument.id);
-        body.push_str("</p>\n<p>");
-        push_escaped(&mut body, &argument.text);
-        body.push_str("</p>\n");
-        if argument.cites.is_empty() {
-            body.push_str("<p>cites no evidence</p>\n");
-        } else {
-            body.push_str("<ul>\n");
-            for cite in &argument.cites {
-                body.push_str("<li>");
-                push_escaped(&mut body, cite.url().as_str());
-                body.push(' ');
-                push_escaped(&mut body, cite.excerpt());
-                body.push_str("</li>\n");
-            }
-            body.push_str("</ul>\n");
-        }
-        body.push_str("</article>\n");
-    }
-    out.push_str(&card("Arguments", &body));
-}
-
-fn push_author_counts(
-    out: &mut String,
-    heading: &str,
-    rule: &str,
-    totals: &BTreeMap<String, usize>,
-    chrome: &Chrome<'_>,
-) {
-    let mut body = String::from("<p>");
-    body.push_str(rule);
-    body.push_str("</p>\n<ul>\n");
-    for (author, count) in totals {
-        body.push_str("<li>");
-        body.push_str(&peer(chrome, author));
-        body.push_str(": ");
-        body.push_str(&count.to_string());
-        body.push_str("</li>\n");
-    }
-    body.push_str("</ul>\n");
-    out.push_str(&card(heading, &body));
 }
 
 fn push_header(out: &mut String, prefix: &str, section: Option<Section>, paint: Paint) {
