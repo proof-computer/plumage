@@ -19,18 +19,19 @@ forthebirds-net = { git = "https://github.com/proof-computer/forthebirds", rev =
 forthebirds-runtime = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
 forthebirds-store = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
 forthebirds-sync = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
+liskov-cargo-harness = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "process", "net"] }
 url = { version = "2", features = ["serde"] }
+axum = "0.8"
 
 [lints.rust]
 unsafe_code = "forbid"
 
 [dev-dependencies]
-axum = "0.8"
 jsonschema = { version = "0.60.1", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }

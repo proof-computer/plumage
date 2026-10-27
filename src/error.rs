@@ -64,3 +64,12 @@ impl From<forthebirds_net::Error> for Error {
         }
     }
 }
+
+impl From<liskov_cargo_harness::Error> for Error {
+    fn from(error: liskov_cargo_harness::Error) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}

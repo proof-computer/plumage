@@ -18,6 +18,7 @@ use plumage::config::PeerConfig;
 use plumage::day::Day;
 use plumage::fetch::{FetchError, Source};
 use plumage::peer;
+use plumage::peer::PeerSource;
 use plumage::site::ASSETS;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -108,7 +109,16 @@ fn peer_config(
         token_budget: None,
         memory_budget: 1_000_000,
         memory_item_tokens: 512,
+        liskov: None,
     }
+}
+
+fn start(
+    config: PeerConfig,
+    shutdown: watch::Receiver<bool>,
+) -> impl Future<Output = Result<(), plumage::error::Error>> {
+    let peers = PeerSource::from_static(config.peers.clone()).expect("static peers");
+    peer::run(config, EmptySource, peers, shutdown)
 }
 
 fn required_config() -> Value {
@@ -191,7 +201,7 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     let (sender, receiver) = watch::channel(false);
     let config = peer_config(root.path(), "p00", &model, Vec::new(), shared);
     let started = wall_now();
-    peer::run(config, EmptySource, receiver).await.unwrap();
+    start(config, receiver).await.unwrap();
     let ended = wall_now();
     drop(sender);
     server.abort();
@@ -270,10 +280,7 @@ async fn two_peers_replicate_votes_and_stay_undecided_on_a_tie() {
     );
     let (_left_stop, left_rx) = watch::channel(false);
     let (_right_stop, right_rx) = watch::channel(false);
-    let (left_run, right_run) = tokio::join!(
-        peer::run(left, EmptySource, left_rx),
-        peer::run(right, EmptySource, right_rx),
-    );
+    let (left_run, right_run) = tokio::join!(start(left, left_rx), start(right, right_rx),);
     left_run.unwrap();
     right_run.unwrap();
     server.abort();
@@ -392,15 +399,14 @@ async fn an_incoming_job_recomputes_yesterday_from_the_sibling_ledger() {
         advertisement_file: root.path().join("p01.ad"),
     }];
     let (stop_leader, leader_rx) = watch::channel(false);
-    let leader_run = tokio::spawn(async move { peer::run(leader, EmptySource, leader_rx).await });
+    let leader_run = tokio::spawn(async move { start(leader, leader_rx).await });
     let closed = root.path().join(format!("p00-site/days/{DAY}.json"));
     until("leader closes the first day", || closed.is_file()).await;
 
     let mut follower = peer_config(root.path(), "p01", &model, follower_peers, shared);
     follower.last_day = Some(shift(day(), 1));
     let (stop_follower, follower_rx) = watch::channel(false);
-    let follower_run =
-        tokio::spawn(async move { peer::run(follower, EmptySource, follower_rx).await });
+    let follower_run = tokio::spawn(async move { start(follower, follower_rx).await });
     let copied = root.path().join(format!("p01-site/days/{DAY}.json"));
     until("follower recomputes yesterday", || copied.is_file()).await;
     assert_eq!(
@@ -441,7 +447,7 @@ async fn a_partial_closed_day_is_not_painted_until_catch_up() {
     leader.last_day = None;
 
     let (stop_leader, leader_rx) = watch::channel(false);
-    let leader_run = tokio::spawn(async move { peer::run(leader, EmptySource, leader_rx).await });
+    let leader_run = tokio::spawn(async move { start(leader, leader_rx).await });
     let closed = root.path().join(format!("p00-site/days/{DAY}.json"));
     until("leader closes the seeded day", || closed.is_file()).await;
 
@@ -460,8 +466,7 @@ async fn a_partial_closed_day_is_not_painted_until_catch_up() {
     follower.sync_interval_ms = 8_000;
     follower.activation_interval_ms = plumage::config::MAX_ACTIVATION_INTERVAL_MS;
     let (stop_follower, follower_rx) = watch::channel(false);
-    let follower_run =
-        tokio::spawn(async move { peer::run(follower, EmptySource, follower_rx).await });
+    let follower_run = tokio::spawn(async move { start(follower, follower_rx).await });
 
     let redb = root.path().join(format!("p01/{DAY}.redb"));
     let started = tokio::time::Instant::now();
@@ -500,7 +505,7 @@ async fn closed_days_older_than_seven_leave_the_sync_and_stay_on_disk() {
     config.last_day = None;
     config.activation_interval_ms = plumage::config::MAX_ACTIVATION_INTERVAL_MS;
     let (stop, shutdown) = watch::channel(false);
-    let running = tokio::spawn(async move { peer::run(config, EmptySource, shutdown).await });
+    let running = tokio::spawn(async move { start(config, shutdown).await });
 
     let held = shift(day(), 8);
     let status_path = root.path().join("p00-site/status.json");

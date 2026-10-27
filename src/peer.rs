@@ -9,7 +9,9 @@ use std::time::Duration;
 use forthebirds_inference::InferenceConfig;
 use forthebirds_inference::model::Model;
 use forthebirds_names::{bird_name, collision_ranks, numbered};
-use forthebirds_net::{PeerTransport, StaticPeers, TransportConfig, TransportState};
+use forthebirds_net::{
+    PeerTarget, PeerTransport, StaticPeer, StaticPeers, TransportConfig, TransportState,
+};
 use forthebirds_runtime::activation::Limits;
 use forthebirds_store::LedgerConfig;
 use forthebirds_sync::{Replicator, Runs, SyncConfig};
@@ -43,10 +45,63 @@ const CLOSED_DAY_CACHE_BYTES: usize = 1024 * 1024;
 
 type DayReplicator = Replicator<Book, Record, ()>;
 
+/// Where each sync tick reads the other peers.
+///
+/// `StaticPeers` is not `Clone`, and this crate does not change forthebirds,
+/// so the static list is shared through `Arc`.
+#[derive(Clone)]
+pub enum PeerSource {
+    Static(Arc<StaticPeers>),
+    Liskov(crate::liskov::LiskovPeers),
+    /// Targets built by [`crate::liskov::directory_target`], including loopback
+    /// addresses the directory file reader refuses.
+    Mapped(MappedPeers),
+}
+
+/// One sync tick's targets. The closure runs on every tick.
+#[derive(Clone)]
+pub struct MappedPeers {
+    read: Arc<dyn Fn() -> BTreeMap<String, forthebirds_net::Result<PeerTarget>> + Send + Sync>,
+}
+
+impl PeerSource {
+    /// Today's static list. An invalid entry is `config` before the day starts.
+    pub fn from_static(peers: Vec<StaticPeer>) -> Result<Self> {
+        Ok(Self::Static(Arc::new(StaticPeers::new(peers)?)))
+    }
+
+    /// Re-read the helper directory on each tick, at most once a second.
+    pub fn liskov(env: liskov_cargo_harness::directory::RuntimeEnv) -> Self {
+        Self::Liskov(crate::liskov::LiskovPeers::new(env))
+    }
+
+    /// Call `read` on every tick. The exchange test uses this for loopback.
+    pub fn mapped(
+        read: impl Fn() -> BTreeMap<String, forthebirds_net::Result<PeerTarget>> + Send + Sync + 'static,
+    ) -> Self {
+        Self::Mapped(MappedPeers {
+            read: Arc::new(read),
+        })
+    }
+
+    /// The map `Replicator::tick` takes. Keys are plumage peer ids.
+    pub fn read(&self) -> BTreeMap<String, forthebirds_net::Result<PeerTarget>> {
+        match self {
+            Self::Static(peers) => peers.read(),
+            Self::Liskov(peers) => peers.read(),
+            Self::Mapped(peers) => (peers.read)(),
+        }
+    }
+}
+
 /// Run from `config.clock.day()` through `last_day`. `shutdown` returns `Ok`.
+///
+/// `peers` is read on every sync tick of every kept day. The fetch `source`
+/// is unchanged.
 pub async fn run<S: Source + 'static>(
     config: PeerConfig,
     source: S,
+    peers: PeerSource,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     config.validate()?;
@@ -118,6 +173,7 @@ pub async fn run<S: Source + 'static>(
     .await?;
     let shared = Arc::new(Shared {
         config: Arc::clone(&config),
+        peers,
         runs,
         members: Mutex::new(BTreeMap::new()),
         closed_here: Mutex::new(BTreeSet::new()),
@@ -146,6 +202,7 @@ struct Member {
 
 struct Shared {
     config: Arc<PeerConfig>,
+    peers: PeerSource,
     runs: Runs<Book, Record, ()>,
     members: Mutex<BTreeMap<Day, Member>>,
     closed_here: Mutex<BTreeSet<Day>>,
@@ -311,13 +368,7 @@ async fn sync_day(
     day: Day,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let peers = match StaticPeers::new(shared.config.peers.clone()) {
-        Ok(peers) => peers,
-        Err(error) => {
-            shared.fail(error.into()).await;
-            return;
-        }
-    };
+    let peers = shared.peers.clone();
     let every = Duration::from_millis(shared.config.sync_interval_ms);
     let mut seen = record_count(&book);
     let mut was_settled = shared.settled(day, &replicator).await;
