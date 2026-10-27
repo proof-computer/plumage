@@ -35,6 +35,7 @@ use crate::site::{
     self, Activations, ArchivePage, ArgumentView, Chrome, DayPage, MAX_STATUS_BYTES, Paint, Phase,
     StatusInput, render_archive, render_day, render_flock, render_front, render_how, render_status,
 };
+use crate::tally;
 
 /// Closed day ledgers kept beside the open day.
 pub const KEEP_CLOSED_DAYS: u32 = 7;
@@ -814,6 +815,28 @@ fn frame_from(index: &DayIndex, clock: &DayClock) -> Frame {
     }
 }
 
+/// Replies whose target is an argument in this index, timed on the day clock.
+///
+/// An unresolved `reply_to` is skipped. The status write does not fail.
+fn replies_from(index: &DayIndex, clock: &DayClock) -> Vec<tally::Reply> {
+    let authors: BTreeMap<&str, &str> = index
+        .arguments
+        .iter()
+        .map(|argument| (argument.id.as_str(), argument.author.as_str()))
+        .collect();
+    index
+        .arguments
+        .iter()
+        .filter_map(|argument| {
+            let target = argument.reply_to.as_deref()?;
+            Some(tally::Reply {
+                at_ms: clock.sim(argument.at_ms),
+                target_author: authors.get(target)?.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn cited(index: &DayIndex, argument: &Argument) -> Vec<Evidence> {
     argument
         .cites
@@ -1075,6 +1098,7 @@ async fn write_status(
     previous_day: (Day, Paint),
 ) -> Result<()> {
     let frame = index.map(|index| frame_from(index, &config.clock));
+    let replies = index.map_or_else(Vec::new, |index| replies_from(index, &config.clock));
     let authors_seen = index.map_or_else(BTreeSet::new, |index| {
         authors(index).map(ToOwned::to_owned).collect()
     });
@@ -1099,6 +1123,7 @@ async fn write_status(
         votes,
         evidence,
         arguments,
+        replies: &replies,
         authors_seen: &authors_seen,
         activations: &state.activations,
         previous_day,
@@ -1192,4 +1217,108 @@ fn halted(shutdown: &watch::Receiver<bool>) -> bool {
 
 fn storage(error: std::io::Error) -> Error {
     Error::new("storage", error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_reply_then_a_vote_change_is_counted_in_status() {
+        let root = tempfile::tempdir().unwrap();
+        let day = Day::from_str("2026-10-26").unwrap();
+        let config = PeerConfig {
+            peer_id: "a".to_owned(),
+            data_dir: root.path().join("data"),
+            site_dir: root.path().join("site"),
+            model_url: "http://127.0.0.1:9/".to_owned(),
+            listen: "[::1]:0".parse().unwrap(),
+            advertisement_file: root.path().join("a.ad"),
+            peers: Vec::new(),
+            token: "fixture-only-peer-token-0123456789".to_owned(),
+            clock: DayClock {
+                real_start_ms: 0,
+                sim_start_ms: 0,
+                speed: 1,
+            },
+            last_day: Some(day),
+            activation_interval_ms: 1_800_000,
+            sync_interval_ms: 100,
+            max_steps: 16,
+            context_tokens: 4_096,
+            output_tokens: 512,
+            inference_timeout_seconds: 180,
+            request_timeout_seconds: 30,
+            fetch_timeout_seconds: 10,
+            token_budget: None,
+            memory_budget: 1_000_000,
+            memory_item_tokens: 512,
+            liskov: None,
+        };
+        let mut index = DayIndex::default();
+        index.arguments = vec![
+            Argument {
+                id: "arg-b".to_owned(),
+                author: "b".to_owned(),
+                at_ms: 10,
+                text: "blue holds".to_owned(),
+                cites: Vec::new(),
+                reply_to: None,
+            },
+            Argument {
+                id: "arg-a".to_owned(),
+                author: "a".to_owned(),
+                at_ms: 20,
+                text: "answering b".to_owned(),
+                cites: Vec::new(),
+                reply_to: Some("arg-b".to_owned()),
+            },
+            Argument {
+                id: "arg-missing".to_owned(),
+                author: "a".to_owned(),
+                at_ms: 21,
+                text: "names nothing stored".to_owned(),
+                cites: Vec::new(),
+                reply_to: Some("arg-absent".to_owned()),
+            },
+        ];
+        index.votes = vec![
+            Vote {
+                author: "b".to_owned(),
+                colour: Colour::Blue,
+                at_ms: 5,
+            },
+            Vote {
+                author: "b".to_owned(),
+                colour: Colour::Red,
+                at_ms: 30,
+            },
+        ];
+        let state = RunState {
+            activations: Activations::default(),
+            started_real_ms: 0,
+        };
+        write_status(
+            &config,
+            day,
+            Phase::Voting,
+            Some(&index),
+            &state,
+            (day.previous(), Paint::NoRecord),
+        )
+        .await
+        .unwrap();
+
+        let bytes = std::fs::read(config.site_dir.join("status.json")).unwrap();
+        let rendered = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!rendered.contains("blue holds"));
+        assert!(!rendered.contains("answering b"));
+        assert!(!rendered.contains("names nothing stored"));
+        let status: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["schema"], "plumage.status.v1");
+        assert_eq!(status["records"]["replies"], 1);
+        assert_eq!(status["reply_led_changes"], 1);
+    }
 }
