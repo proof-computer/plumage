@@ -188,7 +188,9 @@ fn log_change(cache: &mut Cache, status: &Value, log: &(dyn Fn(&str) + Send + Sy
 /// Compose the peer, the site server and the optional connector.
 ///
 /// `shutdown` becoming true, or the sender closing, stops every task and
-/// returns `Ok`. A peer error is returned after the connector task is joined.
+/// returns `Ok`. The peer watches a channel owned here. Cleanup signals that
+/// channel, including when the readiness file cannot be written. A peer error
+/// is returned after the connector task is joined.
 pub async fn run(
     config_path: &Path,
     mut config: PeerConfig,
@@ -236,7 +238,10 @@ pub async fn run(
 
     let advertisement = config.advertisement_file.clone();
     let peers = PeerSource::liskov(env);
-    let peer_shutdown = shutdown.clone();
+    // The caller owns `shutdown`. The peer watches this sender so a readiness
+    // error, or any other cleanup, can stop it without that sender.
+    let (peer_stop, peer_shutdown) = watch::channel(false);
+    let bridge = tokio::spawn(forward_shutdown(shutdown.clone(), peer_stop.clone()));
     let peer_task =
         tokio::spawn(async move { peer::run(config, fetch, peers, peer_shutdown).await });
 
@@ -247,24 +252,28 @@ pub async fn run(
         tokio::spawn(async move { prepared.run(state, conn_rx).await })
     });
 
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|error| Error::new("io", error.to_string()))?;
-    let status_url = format!("http://{site_listen}/status.json");
-    let outcome = wait_until_stop(
-        &app,
-        &state,
-        &client,
-        &status_url,
-        &advertisement,
-        &mut shutdown,
-        &peer_task,
-    )
-    .await;
+    let client = reqwest::Client::builder().no_proxy().build();
+    let outcome = match client {
+        Ok(client) => {
+            let status_url = format!("http://{site_listen}/status.json");
+            wait_until_stop(
+                &app,
+                &state,
+                &client,
+                &status_url,
+                &advertisement,
+                &mut shutdown,
+                &peer_task,
+            )
+            .await
+        }
+        Err(error) => Err(Error::new("io", error.to_string())),
+    };
 
     let _ = serve_stop.send(true);
     let _ = conn_stop.send(true);
+    let _ = peer_stop.send(true);
+    bridge.abort();
     let peer_result = peer_task
         .await
         .unwrap_or_else(|error| Err(Error::new("io", format!("peer task ended: {error}"))));
@@ -387,4 +396,10 @@ async fn until_stop(shutdown: &mut watch::Receiver<bool>) {
             return;
         }
     }
+}
+
+/// Signal `peer_stop` when `external` becomes true or its sender closes.
+async fn forward_shutdown(mut external: watch::Receiver<bool>, peer_stop: watch::Sender<bool>) {
+    until_stop(&mut external).await;
+    let _ = peer_stop.send(true);
 }

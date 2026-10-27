@@ -387,6 +387,119 @@ async fn liskov_process_serves_status_then_exits_on_term() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_write_error_exits_without_an_external_signal() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let site_port = free_port("127.0.0.1:0");
+    let sync_port = free_port("[::1]:0");
+    let config_path = root.path().join("peer.json");
+    let ready = root.path().join("missing-parent").join("ready");
+    let advert = root.path().join("advert.json");
+    let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/liskov-discovery-v2-directory.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "data_dir": root.path().join("data"),
+            "site_dir": root.path().join("site"),
+            "model_url": model,
+            "listen": format!("[::1]:{sync_port}"),
+            "clock": {"real_start_ms": 0, "sim_start_ms": 0, "speed": 1},
+            "last_day": null,
+            "fetch_timeout_seconds": 1,
+            "request_timeout_seconds": 1,
+            "inference_timeout_seconds": 5,
+            "liskov": {"site_listen": format!("127.0.0.1:{site_port}")}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plumage"))
+        .arg("peer")
+        .arg(&config_path)
+        .env("LISKOV_RUNTIME_INSTANCE_ID", "instance-a")
+        .env("LISKOV_PEER_ADVERTISEMENT_FILE", &advert)
+        .env("LISKOV_PEER_DIRECTORY_FILE", &directory)
+        .env("LISKOV_PLUMAGE_PEER_TOKEN", TOKEN)
+        .env("LISKOV_APPLICATION_READY_FILE", &ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let status_url = format!("http://127.0.0.1:{site_port}/status.json");
+    let started = Instant::now();
+    let mut saw_status = false;
+    let mut saw_advert = false;
+    loop {
+        if started.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "peer published neither status nor a readiness error\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        let status_ok = client
+            .get(&status_url)
+            .send()
+            .await
+            .ok()
+            .is_some_and(|response| response.status().as_u16() == 200);
+        if status_ok {
+            saw_status = true;
+        }
+        if advert.is_file() {
+            saw_advert = true;
+        }
+        if saw_status && saw_advert {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let saw = Instant::now();
+    let output = loop {
+        if child.try_wait().unwrap().is_some() {
+            break child.wait_with_output().unwrap();
+        }
+        if saw.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "peer stayed up after the readiness write failed\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "readiness failure must exit 1"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("io:") && stderr.contains("No such file or directory"),
+        "{stderr}"
+    );
+    assert!(saw_status, "status.json never answered 200\n{stderr}");
+    assert!(
+        saw_advert,
+        "advertisement was not published before exit\n{stderr}"
+    );
+    assert!(!ready.is_file());
+    server.abort();
+}
+
 #[test]
 fn missing_peer_token_names_the_variable_and_launch_names_the_payload() {
     let root = tempfile::tempdir().unwrap();
