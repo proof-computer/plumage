@@ -16,7 +16,8 @@ pub struct EvidenceId(pub String);
 /// Immutable evidence: construct from fetched text, retaining its full digest
 /// while bounding the excerpt by Unicode scalar values, not UTF-8 bytes.
 /// Text remains data; this module neither fetches it nor builds prompts.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "EvidenceBody")]
 pub struct Evidence {
     id: EvidenceId,
     author: String,
@@ -31,14 +32,9 @@ impl Evidence {
     /// `text` is fetched data extracted from the JSON response's text fields.
     pub fn new(author: String, run: String, url: Url, fetched_at_ms: u64, text: &str) -> Self {
         let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
-        let mut identity = Sha256::new();
-        // Length-prefix the tuple so field boundaries cannot collide.
-        for field in [&run, &author, url.as_str(), &sha256] {
-            identity.update((field.len() as u64).to_be_bytes());
-            identity.update(field.as_bytes());
-        }
+        let id = derive_id(&run, &author, url.as_str(), &sha256);
         Self {
-            id: EvidenceId(format!("{:x}", identity.finalize())),
+            id,
             author,
             run,
             url,
@@ -74,6 +70,64 @@ impl Evidence {
 
     pub fn excerpt(&self) -> &str {
         &self.excerpt
+    }
+}
+
+/// Length-prefix the tuple so field boundaries cannot collide.
+fn derive_id(run: &str, author: &str, url: &str, sha256: &str) -> EvidenceId {
+    let mut identity = Sha256::new();
+    for field in [run, author, url, sha256] {
+        identity.update((field.len() as u64).to_be_bytes());
+        identity.update(field.as_bytes());
+    }
+    EvidenceId(format!("{:x}", identity.finalize()))
+}
+
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceBody {
+    id: EvidenceId,
+    author: String,
+    run: String,
+    url: Url,
+    fetched_at_ms: u64,
+    sha256: String,
+    excerpt: String,
+}
+
+impl TryFrom<EvidenceBody> for Evidence {
+    type Error = String;
+
+    fn try_from(body: EvidenceBody) -> Result<Self, Self::Error> {
+        if !is_lower_hex(&body.sha256, 64) {
+            return Err("sha256 must be 64 lowercase hex digits".into());
+        }
+        if body.excerpt.chars().count() > EXCERPT_CHARS {
+            return Err("excerpt exceeds 600 characters".into());
+        }
+        if !Allowlist::permits(&body.url) {
+            return Err("url is outside the allowlist".into());
+        }
+        let id = derive_id(&body.run, &body.author, body.url.as_str(), &body.sha256);
+        if body.id != id {
+            return Err("id does not match the evidence derivation".into());
+        }
+        Ok(Self {
+            id,
+            author: body.author,
+            run: body.run,
+            url: body.url,
+            fetched_at_ms: body.fetched_at_ms,
+            sha256: body.sha256,
+            excerpt: body.excerpt,
+        })
     }
 }
 
@@ -259,5 +313,27 @@ mod tests {
             evidence("a", "r", WIKI, 0, &prefix).id(),
             evidence("a", "r", WIKI, 0, &format!("{prefix}tail")).id()
         );
+    }
+
+    #[test]
+    fn evidence_round_trips_and_refuses_a_changed_id_excerpt_or_url() {
+        let record = evidence("a", "run", WIKI, 7, "same");
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Evidence>(value.clone()).unwrap(),
+            record
+        );
+
+        let mut changed_id = value.clone();
+        changed_id["id"] = serde_json::json!("0".repeat(64));
+        assert!(serde_json::from_value::<Evidence>(changed_id).is_err());
+
+        let mut long_excerpt = value.clone();
+        long_excerpt["excerpt"] = serde_json::json!("x".repeat(EXCERPT_CHARS + 1));
+        assert!(serde_json::from_value::<Evidence>(long_excerpt).is_err());
+
+        let mut foreign_url = value;
+        foreign_url["url"] = serde_json::json!("https://example.com/");
+        assert!(serde_json::from_value::<Evidence>(foreign_url).is_err());
     }
 }
