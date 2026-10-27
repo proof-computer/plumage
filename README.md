@@ -36,10 +36,12 @@ schema and validation. Fetch intents permit only the Wikimedia on-this-day
 feed and London's sunrise/sunset JSON API, with three fetches per activation.
 Evidence retains a SHA-256 digest and at most 600 characters; arguments are
 limited to 400 characters and eight citations fetched by their author in the
-same run. Peer-id SHA-256 hashes seed the initial event offset. The fetch
-executor exists for the two sources and stores bounded evidence. The site
-renders from votes, arguments and evidence as exact counts with the published
-formulas. Every page shares one shell: the decided colour is the page ground,
+same run. Records and the citation rule are enforced on the store: a fetch is
+stored as evidence, and an argument is written or imported only when its
+citations pass that rule. Peer-id SHA-256 hashes seed the initial event
+offset. The fetch executor exists for the two sources and stores bounded
+evidence. The site renders from votes, arguments and evidence as exact counts
+with the published formulas. Every page shares one shell: the decided colour is the page ground,
 Bricolage Grotesque and IBM Plex Mono are served beside the pages, and the
 masthead, 24-colour band, white cards and freshness footer are the same on
 each page. What each existing page says is unchanged. The peer writes those
