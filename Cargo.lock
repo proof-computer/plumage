@@ -562,7 +562,7 @@ dependencies = [
 [[package]]
 name = "forthebirds-inference"
 version = "0.1.0"
-source = "git+https://github.com/proof-computer/forthebirds?rev=0b3196a5c968bfe6500cfe92c7dcef54a1143e94#0b3196a5c968bfe6500cfe92c7dcef54a1143e94"
+source = "git+https://github.com/proof-computer/forthebirds?rev=0ae712dfa9297089a5e1c80461e6037822eb5d5a#0ae712dfa9297089a5e1c80461e6037822eb5d5a"
 dependencies = [
  "reqwest",
  "serde",
@@ -573,7 +573,7 @@ dependencies = [
 [[package]]
 name = "forthebirds-names"
 version = "0.1.0"
-source = "git+https://github.com/proof-computer/forthebirds?rev=0b3196a5c968bfe6500cfe92c7dcef54a1143e94#0b3196a5c968bfe6500cfe92c7dcef54a1143e94"
+source = "git+https://github.com/proof-computer/forthebirds?rev=0ae712dfa9297089a5e1c80461e6037822eb5d5a#0ae712dfa9297089a5e1c80461e6037822eb5d5a"
 dependencies = [
  "sha2",
 ]
@@ -581,7 +581,7 @@ dependencies = [
 [[package]]
 name = "forthebirds-net"
 version = "0.1.0"
-source = "git+https://github.com/proof-computer/forthebirds?rev=0b3196a5c968bfe6500cfe92c7dcef54a1143e94#0b3196a5c968bfe6500cfe92c7dcef54a1143e94"
+source = "git+https://github.com/proof-computer/forthebirds?rev=0ae712dfa9297089a5e1c80461e6037822eb5d5a#0ae712dfa9297089a5e1c80461e6037822eb5d5a"
 dependencies = [
  "axum",
  "axum-server",
@@ -603,7 +603,7 @@ dependencies = [
 [[package]]
 name = "forthebirds-runtime"
 version = "0.1.0"
-source = "git+https://github.com/proof-computer/forthebirds?rev=0b3196a5c968bfe6500cfe92c7dcef54a1143e94#0b3196a5c968bfe6500cfe92c7dcef54a1143e94"
+source = "git+https://github.com/proof-computer/forthebirds?rev=0ae712dfa9297089a5e1c80461e6037822eb5d5a#0ae712dfa9297089a5e1c80461e6037822eb5d5a"
 dependencies = [
  "forthebirds-inference",
  "serde",
@@ -613,7 +613,7 @@ dependencies = [
 [[package]]
 name = "forthebirds-store"
 version = "0.1.0"
-source = "git+https://github.com/proof-computer/forthebirds?rev=0b3196a5c968bfe6500cfe92c7dcef54a1143e94#0b3196a5c968bfe6500cfe92c7dcef54a1143e94"
+source = "git+https://github.com/proof-computer/forthebirds?rev=0ae712dfa9297089a5e1c80461e6037822eb5d5a#0ae712dfa9297089a5e1c80461e6037822eb5d5a"
 dependencies = [
  "hex",
  "rouchdb",
@@ -626,7 +626,7 @@ dependencies = [
 [[package]]
 name = "forthebirds-sync"
 version = "0.1.0"
-source = "git+https://github.com/proof-computer/forthebirds?rev=0b3196a5c968bfe6500cfe92c7dcef54a1143e94#0b3196a5c968bfe6500cfe92c7dcef54a1143e94"
+source = "git+https://github.com/proof-computer/forthebirds?rev=0ae712dfa9297089a5e1c80461e6037822eb5d5a#0ae712dfa9297089a5e1c80461e6037822eb5d5a"
 dependencies = [
  "axum",
  "forthebirds-net",
@@ -1762,7 +1762,7 @@ dependencies = [
 [[package]]
 name = "rouchdb-adapter-redb"
 version = "0.5.1"
-source = "git+https://github.com/proof-computer/forthebirds?rev=0b3196a5c968bfe6500cfe92c7dcef54a1143e94#0b3196a5c968bfe6500cfe92c7dcef54a1143e94"
+source = "git+https://github.com/proof-computer/forthebirds?rev=0ae712dfa9297089a5e1c80461e6037822eb5d5a#0ae712dfa9297089a5e1c80461e6037822eb5d5a"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

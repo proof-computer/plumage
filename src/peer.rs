@@ -1,7 +1,9 @@
-//! One peer process: a ledger per day, pinned sync, activations, and the site.
+//! One peer process: the open day and the last seven closed days, pinned sync,
+//! activations, and the site.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use forthebirds_inference::InferenceConfig;
@@ -10,10 +12,10 @@ use forthebirds_names::{bird_name, collision_ranks, numbered};
 use forthebirds_net::{PeerTransport, StaticPeers, TransportConfig, TransportState};
 use forthebirds_runtime::activation::Limits;
 use forthebirds_store::LedgerConfig;
-use forthebirds_sync::{Replicator, SyncConfig};
+use forthebirds_sync::{Replicator, Runs, SyncConfig};
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::task::JoinHandle;
 
 use crate::activation;
@@ -26,10 +28,20 @@ use crate::day::Day;
 use crate::error::{Error, Result};
 use crate::evidence::Evidence;
 use crate::fetch::{self, Source};
+use crate::record::Record;
 use crate::site::{
     self, Activations, ArchivePage, ArgumentView, Chrome, DayPage, MAX_STATUS_BYTES, Paint, Phase,
     StatusInput, render_archive, render_day, render_flock, render_front, render_how, render_status,
 };
+
+/// Closed day ledgers kept beside the open day.
+pub const KEEP_CLOSED_DAYS: u32 = 7;
+
+/// Page cache for a closed day's database. The open day keeps
+/// [`DATABASE_CACHE_BYTES`], so eight open books stay within 4 MiB + 7 × 1 MiB.
+const CLOSED_DAY_CACHE_BYTES: usize = 1024 * 1024;
+
+type DayReplicator = Replicator<Book, Record, ()>;
 
 /// Run from `config.clock.day()` through `last_day`. `shutdown` returns `Ok`.
 pub async fn run<S: Source + 'static>(
@@ -38,7 +50,8 @@ pub async fn run<S: Source + 'static>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     config.validate()?;
-    let mut state = RunState {
+    let config = Arc::new(config);
+    let state = RunState {
         activations: Activations::default(),
         started_real_ms: forthebirds_store::now(),
     };
@@ -54,7 +67,7 @@ pub async fn run<S: Source + 'static>(
         tokio::fs::create_dir_all(parent).await.map_err(storage)?;
     }
     write_assets(&config.site_dir).await?;
-    let mut day = config.clock.day();
+    let day = config.clock.day();
     let previous_day = day.previous();
     let phase = if config.clock.now_ms() >= day.close_ms() {
         Phase::SyncOnly
@@ -90,8 +103,281 @@ pub async fn run<S: Source + 'static>(
         read_paint(&config.site_dir, previous_day).await?,
     )
     .await?;
+    let runs = Runs::new(&config.peer_id, config.token.clone())?;
+    let router = runs.router();
+    let transport = PeerTransport::start(
+        &TransportConfig {
+            listen: config.listen,
+            advertisement_file: Some(config.advertisement_file.clone()),
+            service: "plumage".to_owned(),
+            application: "plumage".to_owned(),
+        },
+        &TransportState::default(),
+        router,
+    )
+    .await?;
+    let shared = Arc::new(Shared {
+        config: Arc::clone(&config),
+        runs,
+        members: Mutex::new(BTreeMap::new()),
+        closed_here: Mutex::new(BTreeSet::new()),
+        open_day: Mutex::new(day),
+        state: Mutex::new(state),
+        site: Mutex::new(()),
+        error: Mutex::new(None),
+        error_notify: Notify::new(),
+    });
+    let outcome = run_days(&config, &model, &source, &shared, day, &mut shutdown).await;
+    shared.stop_all().await;
+    let stopped = transport.stop().await;
+    if let Some(error) = shared.error.lock().await.take() {
+        return Err(error);
+    }
+    outcome?;
+    stopped?;
+    Ok(())
+}
+
+struct Member {
+    book: Book,
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+struct Shared {
+    config: Arc<PeerConfig>,
+    runs: Runs<Book, Record, ()>,
+    members: Mutex<BTreeMap<Day, Member>>,
+    closed_here: Mutex<BTreeSet<Day>>,
+    open_day: Mutex<Day>,
+    state: Mutex<RunState>,
+    site: Mutex<()>,
+    error: Mutex<Option<Error>>,
+    error_notify: Notify,
+}
+
+impl Shared {
+    async fn insert(self: &Arc<Self>, day: Day, cache: usize) -> Result<()> {
+        let book = Book::open(ledger_config(&self.config, day, cache)).await?;
+        let replicator = Replicator::new(
+            book.clone(),
+            SyncConfig {
+                run_id: day.to_string(),
+                peer_id: self.config.peer_id.clone(),
+                token: self.config.token.clone(),
+                request_timeout: Duration::from_secs(self.config.request_timeout_seconds),
+            },
+        )?;
+        self.runs.insert(replicator.clone()).await?;
+        let (stop, stop_rx) = watch::channel(false);
+        let shared = Arc::clone(self);
+        let task_book = book.clone();
+        let task = tokio::spawn(async move {
+            sync_day(shared, replicator, task_book, day, stop_rx).await;
+        });
+        self.members
+            .lock()
+            .await
+            .insert(day, Member { book, stop, task });
+        Ok(())
+    }
+
+    async fn note_closed(&self, day: Day) {
+        self.closed_here.lock().await.insert(day);
+    }
+
+    /// Stop the day's loop, drop its book, and wait until the database file is free.
+    async fn stop_member(&self, day: Day) -> Result<()> {
+        let Some(member) = self.members.lock().await.remove(&day) else {
+            return Ok(());
+        };
+        let Member { book, stop, task } = member;
+        let _ = stop.send(true);
+        let _ = task.await;
+        let _ = self.runs.remove(&day.to_string()).await;
+        let db = Arc::clone(&book.ledger().db);
+        drop(book);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&db) > 1 {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::new(
+                    "storage",
+                    format!("day {day} database stayed open"),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(db);
+        Ok(())
+    }
+
+    /// Reopen a day that just closed so its cache is [`CLOSED_DAY_CACHE_BYTES`].
+    async fn shrink(self: &Arc<Self>, day: Day) -> Result<()> {
+        self.note_closed(day).await;
+        self.stop_member(day).await?;
+        self.insert(day, CLOSED_DAY_CACHE_BYTES).await
+    }
+
+    async fn stop_all(&self) {
+        let days: Vec<Day> = self.members.lock().await.keys().copied().collect();
+        for day in days {
+            let _ = self.stop_member(day).await;
+        }
+    }
+
+    async fn book(&self, day: Day) -> Result<Book> {
+        self.members
+            .lock()
+            .await
+            .get(&day)
+            .map(|member| member.book.clone())
+            .ok_or_else(|| Error::new("storage", format!("day {day} is not open")))
+    }
+
+    async fn fail(&self, error: Error) {
+        let mut slot = self.error.lock().await;
+        if slot.is_none() {
+            *slot = Some(error);
+            self.error_notify.notify_one();
+        }
+    }
+
+    async fn settled(&self, day: Day, replicator: &DayReplicator) -> bool {
+        if self.closed_here.lock().await.contains(&day) {
+            return true;
+        }
+        replicator.caught_up_ms().await.is_some()
+    }
+
+    async fn maybe_recompute(
+        &self,
+        replicator: &DayReplicator,
+        book: &Book,
+        day: Day,
+    ) -> Result<()> {
+        let open = *self.open_day.lock().await;
+        let closed_here = self.closed_here.lock().await.contains(&day);
+        if day >= open && !closed_here {
+            return Ok(());
+        }
+        if !closed_here && replicator.caught_up_ms().await.is_none() {
+            return Ok(());
+        }
+        if record_count(book) == 0 {
+            return Ok(());
+        }
+        let _site = self.site.lock().await;
+        let old_paint = read_paint(&self.config.site_dir, day).await?;
+        let closed = write_closed_day(&self.config, book, day).await?;
+        if closed.json_changed {
+            println!(
+                "plumage day day={day} peer={} decision={} live={} records={} source=recomputed",
+                self.config.peer_id, closed.label, closed.live, closed.records
+            );
+        }
+        if day == open.previous() && old_paint != closed.paint {
+            let open_book = self.book(open).await?;
+            write_live(&self.config, &open_book, open).await?;
+            let names = display_names(&self.config.peer_id, std::iter::empty());
+            write_how(&self.config, &names, closed.paint).await?;
+            let phase = if self.config.clock.now_ms() >= open.close_ms() {
+                Phase::SyncOnly
+            } else {
+                Phase::Voting
+            };
+            let state = self.state.lock().await;
+            let index = open_book.index();
+            write_status(
+                &self.config,
+                open,
+                phase,
+                Some(&index),
+                &state,
+                (day, closed.paint),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Same interval, targets and shutdown as [`Replicator::run`]. The tick is
+/// explicit so a closed day is recomputed only after that tick sets
+/// `caught_up_ms`.
+async fn sync_day(
+    shared: Arc<Shared>,
+    replicator: DayReplicator,
+    book: Book,
+    day: Day,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let peers = match StaticPeers::new(shared.config.peers.clone()) {
+        Ok(peers) => peers,
+        Err(error) => {
+            shared.fail(error.into()).await;
+            return;
+        }
+    };
+    let every = Duration::from_millis(shared.config.sync_interval_ms);
+    let mut seen = record_count(&book);
+    let mut was_settled = shared.settled(day, &replicator).await;
+    if let Err(error) = shared.maybe_recompute(&replicator, &book, day).await {
+        shared.fail(error).await;
+        return;
+    }
+    let mut interval = tokio::time::interval(every);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        if halted(&shutdown) {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+        if *shutdown.borrow() {
+            return;
+        }
+        replicator.tick(peers.read(), &mut shutdown).await;
+        let count = record_count(&book);
+        let settled = shared.settled(day, &replicator).await;
+        let gained = count > seen;
+        let became = settled && !was_settled;
+        seen = count;
+        was_settled = settled;
+        if settled
+            && count > 0
+            && (gained || became)
+            && let Err(error) = shared.maybe_recompute(&replicator, &book, day).await
+        {
+            shared.fail(error).await;
+            return;
+        }
+    }
+}
+
+async fn run_days<S: Source>(
+    config: &PeerConfig,
+    model: &Model,
+    source: &S,
+    shared: &Arc<Shared>,
+    mut day: Day,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<()> {
+    for age in (0..=KEEP_CLOSED_DAYS).rev() {
+        let cache = if age == 0 {
+            DATABASE_CACHE_BYTES
+        } else {
+            CLOSED_DAY_CACHE_BYTES
+        };
+        shared.insert(rewind(day, age), cache).await?;
+    }
+    loop {
+        if let Some(error) = shared.error.lock().await.take() {
+            return Err(error);
+        }
+        if halted(shutdown) {
             return Ok(());
         }
         if let Some(last) = config.last_day
@@ -99,11 +385,16 @@ pub async fn run<S: Source + 'static>(
         {
             return Ok(());
         }
-        let stop = run_day(&config, &model, &source, day, &mut shutdown, &mut state).await?;
+        *shared.open_day.lock().await = day;
+        let stop = run_day(config, model, source, day, shutdown, shared).await?;
         if stop || config.last_day == Some(day) {
             return Ok(());
         }
-        day = day.next();
+        let next = day.next();
+        shared.shrink(day).await?;
+        shared.insert(next, DATABASE_CACHE_BYTES).await?;
+        shared.stop_member(rewind(day, KEEP_CLOSED_DAYS)).await?;
+        day = next;
     }
 }
 
@@ -114,42 +405,9 @@ async fn run_day<S: Source>(
     source: &S,
     day: Day,
     shutdown: &mut watch::Receiver<bool>,
-    state: &mut RunState,
+    shared: &Arc<Shared>,
 ) -> Result<bool> {
-    let book = Book::open(ledger_config(config, day)).await?;
-    let replicator = Replicator::new(
-        book.clone(),
-        SyncConfig {
-            run_id: day.to_string(),
-            peer_id: config.peer_id.clone(),
-            token: config.token.clone(),
-            request_timeout: Duration::from_secs(config.request_timeout_seconds),
-        },
-    )?;
-    let peers = StaticPeers::new(config.peers.clone())?;
-    let transport = PeerTransport::start(
-        &TransportConfig {
-            listen: config.listen,
-            advertisement_file: Some(config.advertisement_file.clone()),
-            service: "plumage".to_owned(),
-            application: "plumage".to_owned(),
-        },
-        &TransportState::default(),
-        replicator.router(),
-    )
-    .await?;
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let every = Duration::from_millis(config.sync_interval_ms);
-    let syncing = replicator.clone();
-    let sync_task = tokio::spawn(async move {
-        syncing.run(every, move || peers.read(), stop_rx).await;
-    });
-    let mut session = DaySession {
-        stop_tx: Some(stop_tx),
-        sync_task: Some(sync_task),
-        transport: Some(transport),
-    };
-
+    let book = shared.book(day).await?;
     let limits = Limits {
         max_steps: usize::try_from(config.max_steps).unwrap_or(usize::MAX),
         output_tokens: config.output_tokens,
@@ -157,34 +415,28 @@ async fn run_day<S: Source>(
     };
     let mut last_start = None;
     loop {
+        if let Some(error) = shared.error.lock().await.take() {
+            return Err(error);
+        }
         if halted(shutdown) {
-            session.finish().await?;
             return Ok(true);
         }
         let now = config.clock.now_ms();
         if now >= day.close_ms() {
             let previous = day.previous();
-            let paint = match read_paint(&config.site_dir, previous).await {
-                Ok(paint) => paint,
-                Err(error) => {
-                    session.finish().await?;
-                    return Err(error);
-                }
-            };
+            let paint = read_paint(&config.site_dir, previous).await?;
             let index = book.index();
-            if let Err(error) = write_status(
+            let _site = shared.site.lock().await;
+            let state = shared.state.lock().await;
+            write_status(
                 config,
                 day,
                 Phase::SyncOnly,
                 Some(&index),
-                state,
+                &state,
                 (previous, paint),
             )
-            .await
-            {
-                session.finish().await?;
-                return Err(error);
-            }
+            .await?;
             break;
         }
         let due = last_start.is_none_or(|started: u64| {
@@ -195,8 +447,10 @@ async fn run_day<S: Source>(
                 .unwrap_or(now)
                 .saturating_add(config.activation_interval_ms)
                 .min(day.close_ms());
-            if wait_until(&config.clock, wake, shutdown).await {
-                session.finish().await?;
+            if wait_until(&config.clock, wake, shutdown, shared).await {
+                if let Some(error) = shared.error.lock().await.take() {
+                    return Err(error);
+                }
                 return Ok(true);
             }
             continue;
@@ -218,7 +472,10 @@ async fn run_day<S: Source>(
         .await
         {
             Ok(colour) => {
-                state
+                shared
+                    .state
+                    .lock()
+                    .await
                     .activations
                     .record_vote(colour, forthebirds_store::now());
                 println!(
@@ -228,7 +485,10 @@ async fn run_day<S: Source>(
                 );
             }
             Err(error) => {
-                state
+                shared
+                    .state
+                    .lock()
+                    .await
                     .activations
                     .record_error(error.code, forthebirds_store::now());
                 println!(
@@ -238,77 +498,55 @@ async fn run_day<S: Source>(
             }
         }
         for failure in &fetch_failures {
-            state.activations.record_fetch_failure(failure.code);
+            shared
+                .state
+                .lock()
+                .await
+                .activations
+                .record_fetch_failure(failure.code);
             println!(
                 "plumage fetch day={day} peer={} id={id} host={} outcome=error:{}",
                 config.peer_id, failure.host, failure.code
             );
         }
-        if let Err(error) = write_live(config, &book, day).await {
-            session.finish().await?;
-            return Err(error);
-        }
         let previous = day.previous();
-        let paint = match read_paint(&config.site_dir, previous).await {
-            Ok(paint) => paint,
-            Err(error) => {
-                session.finish().await?;
-                return Err(error);
-            }
-        };
+        let paint = read_paint(&config.site_dir, previous).await?;
         let index = book.index();
-        if let Err(error) = write_status(
-            config,
-            day,
-            Phase::Voting,
-            Some(&index),
-            state,
-            (previous, paint),
-        )
-        .await
         {
-            session.finish().await?;
-            return Err(error);
+            let _site = shared.site.lock().await;
+            write_live(config, &book, day).await?;
+            let state = shared.state.lock().await;
+            write_status(
+                config,
+                day,
+                Phase::Voting,
+                Some(&index),
+                &state,
+                (previous, paint),
+            )
+            .await?;
         }
     }
-    if wait_until(&config.clock, day.next().open_ms(), shutdown).await {
-        session.finish().await?;
+    if wait_until(&config.clock, day.next().open_ms(), shutdown, shared).await {
+        if let Some(error) = shared.error.lock().await.take() {
+            return Err(error);
+        }
         return Ok(true);
     }
-    let published = publish_close(config, &book, day, state).await;
-    let finished = session.finish().await;
-    published?;
-    finished?;
-    drop(replicator);
+    {
+        let _site = shared.site.lock().await;
+        let state = shared.state.lock().await;
+        publish_close(config, &book, day, &state).await?;
+    }
+    shared.note_closed(day).await;
     drop(book);
     Ok(false)
 }
 
-struct DaySession {
-    stop_tx: Option<watch::Sender<bool>>,
-    sync_task: Option<JoinHandle<()>>,
-    transport: Option<PeerTransport>,
-}
-
-impl DaySession {
-    async fn finish(&mut self) -> Result<()> {
-        if let Some(stop) = self.stop_tx.take() {
-            let _ = stop.send(true);
-        }
-        if let Some(task) = self.sync_task.take() {
-            let _ = task.await;
-        }
-        if let Some(transport) = self.transport.take() {
-            transport.stop().await?;
-        }
-        Ok(())
-    }
-}
-
-fn ledger_config(config: &PeerConfig, day: Day) -> LedgerConfig {
+fn ledger_config(config: &PeerConfig, day: Day, cache: usize) -> LedgerConfig {
     LedgerConfig {
         database_path: config.data_dir.join(format!("{day}.redb")),
-        database_cache_bytes: DATABASE_CACHE_BYTES,
+        database_cache_bytes: cache,
         run_id: day.to_string(),
         peer_id: config.peer_id.clone(),
         token_budget: config.token_budget,
@@ -316,6 +554,18 @@ fn ledger_config(config: &PeerConfig, day: Day) -> LedgerConfig {
         memory_item_tokens: config.memory_item_tokens,
         max_documents: MAX_DOCUMENTS,
     }
+}
+
+fn rewind(mut day: Day, days: u32) -> Day {
+    for _ in 0..days {
+        day = day.previous();
+    }
+    day
+}
+
+fn record_count(book: &Book) -> usize {
+    let index = book.index();
+    index.votes.len() + index.arguments.len() + index.evidence.len()
 }
 
 async fn write_live(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
@@ -351,7 +601,19 @@ async fn write_live(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
     Ok(())
 }
 
-async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunState) -> Result<()> {
+struct ClosedDay {
+    paint: Paint,
+    label: &'static str,
+    live: usize,
+    records: usize,
+    json_changed: bool,
+}
+
+/// `days/<C>.json`, `days/<C>.html` and `days/index.html` from the book's votes.
+///
+/// The JSON is left untouched when it would not change, so a later import that
+/// repeats the same records does not rewrite the day.
+async fn write_closed_day(config: &PeerConfig, book: &Book, day: Day) -> Result<ClosedDay> {
     let index = book.index();
     let frame = frame_from(&index, &config.clock);
     let open = day.open_ms();
@@ -360,7 +622,7 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunSt
     let decision = closing::decide(&frame.votes, &live, open, close);
     let now = config.clock.now_ms();
     let names = display_names(&config.peer_id, authors(&index));
-    let painted = paint_of(&decision);
+    let paint = paint_of(&decision);
     let document = DayDocument {
         day,
         decision: decision_json(&decision),
@@ -373,39 +635,57 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunSt
         .map_err(|error| Error::new("storage", error.to_string()))?;
     let mut published = bytes;
     published.push(b'\n');
-    write_atomic(
-        &config.site_dir.join(format!("days/{day}.json")),
-        &published,
-    )
-    .await?;
-
-    let closed = DayPage {
-        day,
-        votes: &frame.votes,
-        arguments: &frame.arguments,
-        evidence: &frame.evidence,
-        decision: Some(decision),
-        chrome: chrome(&config.peer_id, painted, close, now, &names),
+    let path = config.site_dir.join(format!("days/{day}.json"));
+    let previous = match tokio::fs::read(&path).await {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(storage(error)),
     };
-    write_atomic(
-        &config.site_dir.join(format!("days/{day}.html")),
-        render_day(&closed).as_bytes(),
-    )
-    .await?;
+    let json_changed = previous.as_deref() != Some(published.as_slice());
+    if json_changed {
+        write_atomic(&path, &published).await?;
+        let closed = DayPage {
+            day,
+            votes: &frame.votes,
+            arguments: &frame.arguments,
+            evidence: &frame.evidence,
+            decision: Some(decision),
+            chrome: chrome(&config.peer_id, paint, close, now, &names),
+        };
+        write_atomic(
+            &config.site_dir.join(format!("days/{day}.html")),
+            render_day(&closed).as_bytes(),
+        )
+        .await?;
+        let archive = read_archive(&config.site_dir).await?;
+        let archive_names = display_names(&config.peer_id, std::iter::empty());
+        let archive_chrome = chrome(&config.peer_id, paint, now, now, &archive_names);
+        write_atomic(
+            &config.site_dir.join("days/index.html"),
+            render_archive(&ArchivePage {
+                days: &archive,
+                chrome: archive_chrome,
+            })
+            .as_bytes(),
+        )
+        .await?;
+    }
+    let label = match decision {
+        Decision::Decided { colour, .. } => colour.name(),
+        Decision::Undecided => "undecided",
+    };
+    Ok(ClosedDay {
+        paint,
+        label,
+        live: live.len(),
+        records: index.votes.len() + index.arguments.len() + index.evidence.len(),
+        json_changed,
+    })
+}
 
-    let archive = read_archive(&config.site_dir).await?;
-    let archive_names = display_names(&config.peer_id, std::iter::empty());
-    let archive_chrome = chrome(&config.peer_id, painted, now, now, &archive_names);
-    write_atomic(
-        &config.site_dir.join("days/index.html"),
-        render_archive(&ArchivePage {
-            days: &archive,
-            chrome: archive_chrome,
-        })
-        .as_bytes(),
-    )
-    .await?;
-
+async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunState) -> Result<()> {
+    let closed = write_closed_day(config, book, day).await?;
+    let now = config.clock.now_ms();
     let next = day.next();
     let today_names = display_names(&config.peer_id, std::iter::empty());
     let today = DayPage {
@@ -414,7 +694,7 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunSt
         arguments: &[],
         evidence: &[],
         decision: None,
-        chrome: chrome(&config.peer_id, painted, now, now, &today_names),
+        chrome: chrome(&config.peer_id, closed.paint, now, now, &today_names),
     };
     write_atomic(
         &config.site_dir.join("index.html"),
@@ -426,25 +706,20 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunSt
         render_flock(&today).as_bytes(),
     )
     .await?;
-    write_how(config, &today_names, painted).await?;
+    write_how(config, &today_names, closed.paint).await?;
 
-    let label = match decision {
-        Decision::Decided { colour, .. } => colour.name(),
-        Decision::Undecided => "undecided",
-    };
-    let records = index.votes.len() + index.arguments.len() + index.evidence.len();
     println!(
-        "plumage day day={day} peer={} decision={label} live={} records={records}",
-        config.peer_id,
-        live.len()
+        "plumage day day={day} peer={} decision={} live={} records={}",
+        config.peer_id, closed.label, closed.live, closed.records
     );
+    let index = book.index();
     write_status(
         config,
         day,
         Phase::Closed,
         Some(&index),
         state,
-        (day, painted),
+        (day, closed.paint),
     )
     .await
 }
@@ -832,9 +1107,14 @@ fn temporary_path(path: &Path) -> PathBuf {
 }
 
 /// `true` when `shutdown` is set or its sender is gone.
-async fn wait_until(clock: &DayClock, sim_ms: u64, shutdown: &mut watch::Receiver<bool>) -> bool {
+async fn wait_until(
+    clock: &DayClock,
+    sim_ms: u64,
+    shutdown: &mut watch::Receiver<bool>,
+    shared: &Shared,
+) -> bool {
     loop {
-        if halted(shutdown) {
+        if halted(shutdown) || shared.error.lock().await.is_some() {
             return true;
         }
         let now = forthebirds_store::now();
@@ -842,7 +1122,7 @@ async fn wait_until(clock: &DayClock, sim_ms: u64, shutdown: &mut watch::Receive
         if now >= wake {
             return false;
         }
-        let delay = Duration::from_millis(wake.saturating_sub(now));
+        let delay = Duration::from_millis(wake.saturating_sub(now).min(200));
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || halted(shutdown) {
@@ -850,6 +1130,7 @@ async fn wait_until(clock: &DayClock, sim_ms: u64, shutdown: &mut watch::Receive
                 }
             }
             _ = tokio::time::sleep(delay) => {}
+            _ = shared.error_notify.notified() => return true,
         }
     }
 }
