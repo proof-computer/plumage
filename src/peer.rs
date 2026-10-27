@@ -203,6 +203,7 @@ async fn run_day<S: Source>(
         }
         last_start = Some(now);
         let id = format!("a{now}");
+        let mut fetch_failures = Vec::new();
         match activation::activate(
             &book,
             model,
@@ -212,6 +213,7 @@ async fn run_day<S: Source>(
             config.clock,
             limits,
             &id,
+            &mut fetch_failures,
         )
         .await
         {
@@ -234,6 +236,13 @@ async fn run_day<S: Source>(
                     config.peer_id, error.code
                 );
             }
+        }
+        for failure in &fetch_failures {
+            state.activations.record_fetch_failure(failure.code);
+            println!(
+                "plumage fetch day={day} peer={} id={id} host={} outcome=error:{}",
+                config.peer_id, failure.host, failure.code
+            );
         }
         if let Err(error) = write_live(config, &book, day).await {
             session.finish().await?;

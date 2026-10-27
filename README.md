@@ -45,7 +45,9 @@ with the published formulas. Every page shares one shell: the decided colour is 
 Bricolage Grotesque and IBM Plex Mono are served beside the pages, and the
 masthead, 24-colour band, white cards and freshness footer are the same on
 each page. What each existing page says is unchanged. The peer writes those
-pages. A peer runs whole days: `plumage peer <config.json>` opens one ledger
+pages and publishes `status.json` (`plumage.status.v1`), whose
+`fetch_failures_by_code` counts each failed fetch by its code since the
+process started. A peer runs whole days: `plumage peer <config.json>` opens one ledger
 per day, syncs with its static peers, activates on the day clock, and at the
 next day's open writes that day's result and repaints the site. `plumage lab`
 launches N of those peers as local processes on loopback, sharing one run

@@ -48,6 +48,8 @@ pub struct Activations {
     pub voted: u64,
     /// Errors by the `code` string of [`crate::error::Error`].
     pub errors_by_code: BTreeMap<&'static str, u64>,
+    /// Failed fetches by [`crate::fetch::FetchError`] code, since process start.
+    pub fetch_failures_by_code: BTreeMap<&'static str, u64>,
     /// Wall-clock time of the latest activation, when one has finished.
     pub last_real_ms: Option<u64>,
     /// `voted:<colour>` or `error:<code>` for the latest activation.
@@ -73,6 +75,11 @@ impl Activations {
         self.last_real_ms = Some(real_ms);
         self.last_outcome = Some(format!("error:{code}"));
         self.push_recent(true);
+    }
+
+    /// One fetch that returned `code`. It does not count as an activation.
+    pub fn record_fetch_failure(&mut self, code: &'static str) {
+        *self.fetch_failures_by_code.entry(code).or_default() += 1;
     }
 
     fn push_recent(&mut self, error: bool) {
@@ -157,6 +164,7 @@ pub fn render_status(input: &StatusInput<'_>) -> Vec<u8> {
             .get(input.peer_id)
             .copied()
             .unwrap_or(0),
+        fetch_failures_by_code: &input.activations.fetch_failures_by_code,
         activations: ActivationsView {
             started: input.activations.started,
             voted: input.activations.voted,
@@ -204,6 +212,7 @@ struct Document<'a> {
     authors_seen: Vec<&'a str>,
     authors_truncated: bool,
     fetches: usize,
+    fetch_failures_by_code: &'a BTreeMap<&'static str, u64>,
     activations: ActivationsView<'a>,
     previous_day: PreviousDay,
 }
@@ -380,6 +389,7 @@ mod tests {
                 "authors_seen": ["p00"],
                 "authors_truncated": false,
                 "fetches": 0,
+                "fetch_failures_by_code": {},
                 "activations": {
                     "started": 1,
                     "voted": 1,
@@ -528,5 +538,51 @@ mod tests {
             parse(&fixture.render())["live_voters"],
             json!(["close", "open"])
         );
+    }
+
+    #[test]
+    fn fetch_failures_render_by_code() {
+        let mut activations = Activations::default();
+        activations.record_fetch_failure("fetch_status");
+        activations.record_fetch_failure("fetch_status");
+        activations.record_fetch_failure("too_large");
+        let mut fixture = Fixture::on(day());
+        fixture.activations = activations;
+        assert_eq!(
+            parse(&fixture.render())["fetch_failures_by_code"],
+            json!({"fetch_status": 2, "too_large": 1})
+        );
+    }
+
+    #[test]
+    fn every_fetch_failure_code_at_max_stays_within_the_byte_bound() {
+        let mut activations = Activations::default();
+        for code in [
+            "not_allowed",
+            "fetch_failed",
+            "fetch_status",
+            "too_large",
+            "source_invalid",
+        ] {
+            activations.fetch_failures_by_code.insert(code, u64::MAX);
+        }
+        let mut fixture = Fixture::on(day());
+        fixture.activations = activations;
+        let bytes = fixture.render();
+        assert!(
+            bytes.len() <= MAX_STATUS_BYTES,
+            "status is {} bytes",
+            bytes.len()
+        );
+        let value = parse(&bytes);
+        for code in [
+            "not_allowed",
+            "fetch_failed",
+            "fetch_status",
+            "too_large",
+            "source_invalid",
+        ] {
+            assert_eq!(value["fetch_failures_by_code"][code], u64::MAX);
+        }
     }
 }
