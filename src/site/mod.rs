@@ -9,6 +9,7 @@ mod flock;
 mod front;
 mod how;
 mod layout;
+mod summary;
 
 pub use archive::render_archive;
 pub use day::render_day;
@@ -16,6 +17,10 @@ pub use flock::render_flock;
 pub use front::render_front;
 pub use how::render_how;
 pub use layout::formula;
+pub use summary::{
+    Activations, MAX_AUTHORS, MAX_STATUS_BYTES, Phase, RECENT_WINDOW, SCHEMA, StatusInput,
+    render_status,
+};
 
 use std::collections::BTreeMap;
 
