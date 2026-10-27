@@ -232,10 +232,21 @@ fn remember(index: &mut DayIndex, record: &Record) {
         }
         Record::Evidence(evidence) => {
             index.latest_ms = index.latest_ms.max(evidence.observed_at_ms);
-            index
-                .evidence
-                .entry(evidence.evidence.id().0.clone())
-                .or_insert_with(|| (evidence.id.clone(), evidence.evidence.clone()));
+            // The bare id omits fetched_at_ms, so one citation can have several
+            // ledger records. Recovery walks ledger-id order and a live write
+            // walks commit order; keep the earliest fetch, then the smaller
+            // ledger id, so both rebuild the same entry.
+            let bare_id = evidence.evidence.id().0.clone();
+            let incoming = (evidence.evidence.fetched_at_ms(), evidence.id.as_str());
+            let keep_incoming = match index.evidence.get(&bare_id) {
+                Some((kept_id, kept)) => incoming < (kept.fetched_at_ms(), kept_id.as_str()),
+                None => true,
+            };
+            if keep_incoming {
+                index
+                    .evidence
+                    .insert(bare_id, (evidence.id.clone(), evidence.evidence.clone()));
+            }
         }
     }
 }
@@ -338,6 +349,50 @@ mod tests {
         drop(book);
         let reopened = Book::open(config(&path, "peer-a")).await.unwrap();
         assert_eq!(reopened.index(), index);
+    }
+
+    #[tokio::test]
+    async fn repeated_fetch_keeps_the_earliest_evidence_in_every_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("day.redb");
+        let book = Book::open(config(&path, "peer-a")).await.unwrap();
+        let mut saved = Vec::new();
+        for fetched_at_ms in [3, 1, 4, 2] {
+            let evidence = Evidence::new(
+                "peer-a".into(),
+                "run-1".into(),
+                wiki(),
+                fetched_at_ms,
+                "same feed",
+            );
+            saved.push(book.save_evidence(evidence).await.unwrap());
+        }
+
+        let live = book.index();
+        assert_eq!(live.evidence.len(), 1);
+        let (ledger_id, stored) = live.evidence.values().next().unwrap();
+        let earliest = saved
+            .iter()
+            .find(|record| record.evidence.fetched_at_ms() == 1)
+            .unwrap();
+        assert_eq!(stored.fetched_at_ms(), 1);
+        assert_eq!(ledger_id, &earliest.id);
+
+        drop(book);
+        let reopened = Book::open(config(&path, "peer-a")).await.unwrap();
+        assert_eq!(reopened.index(), live);
+
+        let by_id = reopened.ledger().page(None, 32).await.unwrap();
+        let by_commit = reopened.ledger().changes(0, None).await.unwrap();
+        for (name, records) in [("id", by_id.records), ("commit", by_commit.records)] {
+            let reader = open_at(dir.path(), &format!("{name}.redb"), "peer-b").await;
+            assert_eq!(
+                reader.ledger().import(&reader, records).await.unwrap(),
+                4,
+                "{name}"
+            );
+            assert_eq!(reader.index(), reopened.index(), "{name}");
+        }
     }
 
     #[tokio::test]
