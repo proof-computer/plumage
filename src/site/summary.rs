@@ -114,6 +114,8 @@ pub struct StatusInput<'a> {
     pub evidence: &'a [Evidence],
     /// Argument records in the day's book. The text is not an input.
     pub arguments: usize,
+    /// Replies on the day clock. The file stores the count, not the arguments.
+    pub replies: &'a [tally::Reply],
     /// Distinct authors of votes, arguments and evidence, sorted by the caller.
     pub authors_seen: &'a BTreeSet<String>,
     /// Counts since process start.
@@ -157,6 +159,7 @@ pub fn render_status(input: &StatusInput<'_>) -> Vec<u8> {
             votes: input.votes.len(),
             arguments: input.arguments,
             evidence: input.evidence.len(),
+            replies: tally::replies(input.replies),
         },
         authors_seen,
         authors_truncated,
@@ -164,6 +167,7 @@ pub fn render_status(input: &StatusInput<'_>) -> Vec<u8> {
             .get(input.peer_id)
             .copied()
             .unwrap_or(0),
+        reply_led_changes: tally::reply_led_changes(input.votes, input.replies),
         fetch_failures_by_code: &input.activations.fetch_failures_by_code,
         activations: ActivationsView {
             started: input.activations.started,
@@ -212,6 +216,7 @@ struct Document<'a> {
     authors_seen: Vec<&'a str>,
     authors_truncated: bool,
     fetches: usize,
+    reply_led_changes: usize,
     fetch_failures_by_code: &'a BTreeMap<&'static str, u64>,
     activations: ActivationsView<'a>,
     previous_day: PreviousDay,
@@ -228,6 +233,7 @@ struct Records {
     votes: usize,
     arguments: usize,
     evidence: usize,
+    replies: usize,
 }
 
 #[derive(Serialize)]
@@ -291,6 +297,7 @@ mod tests {
         votes: Vec<Vote>,
         evidence: Vec<Evidence>,
         arguments: usize,
+        replies: Vec<tally::Reply>,
         authors: BTreeSet<String>,
         activations: Activations,
         previous: (Day, Paint),
@@ -309,6 +316,7 @@ mod tests {
                 votes: Vec::new(),
                 evidence: Vec::new(),
                 arguments: 0,
+                replies: Vec::new(),
                 authors: BTreeSet::new(),
                 activations: Activations::default(),
                 previous: (day.previous(), Paint::NoRecord),
@@ -331,6 +339,7 @@ mod tests {
                 votes: &self.votes,
                 evidence: &self.evidence,
                 arguments: self.arguments,
+                replies: &self.replies,
                 authors_seen: &self.authors,
                 activations: &self.activations,
                 previous_day: self.previous,
@@ -385,10 +394,11 @@ mod tests {
                 "phase": "voting",
                 "live_voters": ["p00"],
                 "counts": {"blue": 1},
-                "records": {"votes": 1, "arguments": 1, "evidence": 0},
+                "records": {"votes": 1, "arguments": 1, "evidence": 0, "replies": 0},
                 "authors_seen": ["p00"],
                 "authors_truncated": false,
                 "fetches": 0,
+                "reply_led_changes": 0,
                 "fetch_failures_by_code": {},
                 "activations": {
                     "started": 1,
@@ -418,6 +428,23 @@ mod tests {
             fixture.previous = (day(), paint);
             assert_eq!(parse(&fixture.render())["previous_day"]["paint"], name);
         }
+    }
+
+    #[test]
+    fn replies_and_reply_led_changes_are_the_published_counts() {
+        let open = day().open_ms();
+        let mut fixture = Fixture::on(day());
+        fixture.votes = vec![
+            vote("b", Colour::Blue, open + 1),
+            vote("b", Colour::Red, open + 3),
+        ];
+        fixture.replies = vec![tally::Reply {
+            at_ms: open + 2,
+            target_author: "b".to_owned(),
+        }];
+        let value = parse(&fixture.render());
+        assert_eq!(value["records"]["replies"], 1);
+        assert_eq!(value["reply_led_changes"], 1);
     }
 
     #[test]
@@ -453,12 +480,19 @@ mod tests {
         let evidence = Evidence::new("p00".to_owned(), "2026-10-26".to_owned(), url, 0, SECRET);
         let mut fixture = Fixture::on(day());
         // One argument whose text is `SECRET`. The builder takes the count only.
+        // A reply names that same string as its target author and still leaves
+        // it out of the file.
         fixture.arguments = 1;
         fixture.evidence = vec![evidence];
+        fixture.replies = vec![tally::Reply {
+            at_ms: 0,
+            target_author: SECRET.to_owned(),
+        }];
         let rendered = String::from_utf8(fixture.render()).unwrap();
         assert!(!rendered.contains(SECRET));
         assert!(!rendered.contains("example.invalid"));
         assert_eq!(parse(rendered.as_bytes())["records"]["arguments"], 1);
+        assert_eq!(parse(rendered.as_bytes())["records"]["replies"], 1);
         assert_eq!(parse(rendered.as_bytes())["fetches"], 1);
     }
 
@@ -481,6 +515,12 @@ mod tests {
         let mut fixture = Fixture::on(day());
         fixture.votes = votes;
         fixture.arguments = 300;
+        fixture.replies = (0..256)
+            .map(|at_ms| tally::Reply {
+                at_ms,
+                target_author: format!("p{at_ms:03}"),
+            })
+            .collect();
         fixture.authors = authors;
         fixture.activations = activations;
         fixture.as_of_sim_ms = open;
@@ -491,6 +531,8 @@ mod tests {
             bytes.len()
         );
         let value = parse(&bytes);
+        assert_eq!(value["records"]["replies"], 256);
+        assert_eq!(value["reply_led_changes"], 0);
         assert_eq!(value["authors_truncated"], true);
         let seen = value["authors_seen"].as_array().unwrap();
         assert_eq!(seen.len(), MAX_AUTHORS);

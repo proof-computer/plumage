@@ -1,4 +1,4 @@
-//! Exact counts over a day's vote and evidence records.
+//! Exact counts over a day's vote, reply and evidence records.
 //!
 //! Each count is a pure function. The formula beside it is the published rule.
 
@@ -15,6 +15,8 @@ pub const CURRENT_VOTES_RULE: &str = "An author's current vote is that author's 
 pub const COUNTS_RULE: &str =
     "Each colour's count is the number of authors whose current vote is that colour.";
 pub const VOTE_CHANGES_RULE: &str = "A vote change is a vote whose colour differs from that author's previous vote. The first vote and a repeat of the same colour are not changes.";
+pub const REPLIES_RULE: &str = "A reply is an argument that names another author's argument as reply_to. The day's reply count is the number of such arguments.";
+pub const REPLY_LED_CHANGES_RULE: &str = "A reply-led change is a vote change (see the vote change rule) by an author who received at least one reply after that author's previous vote and at or before the changing vote. Each change counts once, however many replies came before it.";
 pub const CURVE_RULE: &str = "The curve is the colour counts at every whole hour from one hour after the day's open through the day's close.";
 pub const FETCHES_RULE: &str =
     "An author's fetch count is the number of evidence records that author stored.";
@@ -46,6 +48,46 @@ pub fn counts(votes: &[Vote], at_ms: u64) -> BTreeMap<Colour, usize> {
         *counts.entry(*colour).or_default() += 1;
     }
     counts
+}
+
+/// One reply on the day clock: the replying argument's time, and the author of
+/// the argument it answers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Reply {
+    pub at_ms: u64,
+    pub target_author: String,
+}
+
+/// How many replies the day holds. See [`REPLIES_RULE`].
+pub fn replies(replies: &[Reply]) -> usize {
+    replies.len()
+}
+
+/// Reply-led vote changes. See [`REPLY_LED_CHANGES_RULE`].
+///
+/// A vote counts when it differs from that author's previous vote in the same
+/// `(at_ms, author, colour)` order [`vote_changes`] and [`crate::closing::decide`]
+/// use, and some reply to that author sits strictly after the previous vote
+/// and at or before the changing vote.
+pub fn reply_led_changes(votes: &[Vote], replies: &[Reply]) -> usize {
+    let mut ordered: Vec<&Vote> = votes.iter().collect();
+    ordered.sort_by_key(|vote| (vote.at_ms, vote.author.as_str(), vote.colour));
+    let mut previous: BTreeMap<&str, (u64, Colour)> = BTreeMap::new();
+    let mut count = 0;
+    for vote in ordered {
+        if let Some(&(prior_at, prior_colour)) = previous.get(vote.author.as_str())
+            && prior_colour != vote.colour
+            && replies.iter().any(|reply| {
+                reply.target_author == vote.author
+                    && prior_at < reply.at_ms
+                    && reply.at_ms <= vote.at_ms
+            })
+        {
+            count += 1;
+        }
+        previous.insert(vote.author.as_str(), (vote.at_ms, vote.colour));
+    }
+    count
 }
 
 /// Vote changes per author.
@@ -204,6 +246,48 @@ mod tests {
             current_votes(&votes, HOUR_MS),
             BTreeMap::from([("ada".to_owned(), Blue), ("bea".to_owned(), Blue)])
         );
+    }
+
+    fn reply(at_ms: u64, target_author: &str) -> Reply {
+        Reply {
+            at_ms,
+            target_author: target_author.to_owned(),
+        }
+    }
+
+    #[test]
+    fn replies_count_each_reply_once() {
+        assert_eq!(replies(&[]), 0);
+        assert_eq!(replies(&[reply(1, "b"), reply(2, "b"), reply(3, "c")]), 3);
+    }
+
+    #[test]
+    fn reply_led_changes_follow_the_published_window() {
+        let changed = [vote("b", Blue, 1), vote("b", Red, 3)];
+        // b votes blue, a replies to b, then b votes red.
+        assert_eq!(reply_led_changes(&changed, &[reply(2, "b")]), 1);
+        // The same votes with b voting blue again are not a change.
+        let repeated = [vote("b", Blue, 1), vote("b", Blue, 3)];
+        assert_eq!(reply_led_changes(&repeated, &[reply(2, "b")]), 0);
+        // A change with no reply since b's previous vote.
+        assert_eq!(reply_led_changes(&changed, &[]), 0);
+        assert_eq!(reply_led_changes(&changed, &[reply(0, "b")]), 0);
+        // A reply before b's first vote, then that first vote.
+        assert_eq!(
+            reply_led_changes(&[vote("b", Blue, 2)], &[reply(1, "b")]),
+            0
+        );
+        // Two replies before one change count once.
+        assert_eq!(
+            reply_led_changes(&changed, &[reply(2, "b"), reply(2, "b")]),
+            1
+        );
+        // A reply at exactly the previous vote does not count; one at the
+        // changing vote does.
+        assert_eq!(reply_led_changes(&changed, &[reply(1, "b")]), 0);
+        assert_eq!(reply_led_changes(&changed, &[reply(3, "b")]), 1);
+        // A reply to c does not count for b.
+        assert_eq!(reply_led_changes(&changed, &[reply(2, "c")]), 0);
     }
 
     #[test]

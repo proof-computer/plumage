@@ -134,9 +134,10 @@ internet. Every page shows its records' freshness.
 - A reply names one other author's argument. It is not a citation.
 - The only text one peer can put in another's prompt is a bounded typed field
   rendered as data.
-- Rust groups current votes by colour, counts replies that cite another
-  author's record, and counts vote changes within one activation of such a
-  reply, and publishes the formula beside each count. It infers nothing.
+- Rust groups current votes by colour, counts replies (arguments that name
+  another author's argument as `reply_to`), and counts reply-led changes (a
+  vote change by an author who received a reply after that author's previous
+  vote), and publishes the formula beside each count. It infers nothing.
 
 ## Development
 
