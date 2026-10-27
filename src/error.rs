@@ -55,3 +55,12 @@ impl From<forthebirds_inference::Error> for Error {
         }
     }
 }
+
+impl From<forthebirds_net::Error> for Error {
+    fn from(error: forthebirds_net::Error) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}
