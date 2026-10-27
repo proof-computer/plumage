@@ -4,7 +4,7 @@ use crate::actions::{self, Action, Context, Refusal};
 use crate::closing;
 use crate::error::{Error, Result};
 use crate::evidence::{Evidence, EvidenceId};
-use crate::record::{Record, SCHEMA};
+use crate::record::{REPLY_SCHEMA, Record, SCHEMA};
 use forthebirds_store::{ActionRecord, EvidenceRecord, Host, Ledger, LedgerConfig, LedgerRecord};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,6 +30,30 @@ pub struct Argument {
     pub at_ms: u64,
     pub text: String,
     pub cites: Vec<EvidenceId>,
+    pub reply_to: Option<String>,
+}
+
+impl DayIndex {
+    /// Argument ids with their authors, and every other record id in this day.
+    ///
+    /// `seen` keeps a ledger id even when a repeated fetch is not the evidence
+    /// row the index shows, so a reply can name that record and still be refused
+    /// as something other than an argument.
+    pub fn reply_records(&self) -> (Vec<(String, String)>, Vec<String>) {
+        let arguments: Vec<(String, String)> = self
+            .arguments
+            .iter()
+            .map(|argument| (argument.id.clone(), argument.author.clone()))
+            .collect();
+        let argument_ids: BTreeSet<&str> = arguments.iter().map(|(id, _)| id.as_str()).collect();
+        let other_records = self
+            .seen
+            .iter()
+            .filter(|id| !argument_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        (arguments, other_records)
+    }
 }
 
 #[derive(Clone)]
@@ -86,17 +110,26 @@ impl Book {
         }
         if let Action::Argue { .. } = &action {
             let evidence = self.indexed_evidence();
+            let (arguments, other_records) = self.lock_index().reply_records();
             let context = Context {
                 author: &self.ledger.config.peer_id,
                 run: &self.ledger.config.run_id,
                 evidence: &evidence,
                 fetches_this_activation: 0,
+                arguments: &arguments,
+                other_records: &other_records,
             };
             actions::validate(&action, &context).map_err(refused)?;
         }
+        let schema = match &action {
+            Action::Argue {
+                reply_to: Some(_), ..
+            } => REPLY_SCHEMA,
+            _ => SCHEMA,
+        };
         let record = self
             .ledger
-            .execute(self, operation, action, memory_tokens, SCHEMA)
+            .execute(self, operation, action, memory_tokens, schema)
             .await?;
         self.remember(&Record::from(record.clone()));
         Ok(record)
@@ -125,14 +158,17 @@ impl Book {
             return Ok(());
         };
         let evidence = self.indexed_evidence();
+        let (arguments, other_records) = self.lock_index().reply_records();
         let context = Context {
             author: &record.author,
             run: &record.run_id,
             evidence: &evidence,
             fetches_this_activation: 0,
+            arguments: &arguments,
+            other_records: &other_records,
         };
         if let Err(refusal) = actions::validate(&record.action, &context) {
-            let code = if refusal == Refusal::UnknownCitation {
+            let code = if matches!(refusal, Refusal::UnknownCitation | Refusal::UnknownReply) {
                 "missing_reference"
             } else {
                 "invalid_action"
@@ -186,13 +222,18 @@ fn remember(index: &mut DayIndex, record: &Record) {
         Record::Action(action) => {
             index.latest_ms = index.latest_ms.max(action.created_at_ms);
             match &action.action {
-                Action::Argue { text, cites } => {
+                Action::Argue {
+                    text,
+                    cites,
+                    reply_to,
+                } => {
                     let argument = Argument {
                         id: action.id.clone(),
                         author: action.author.clone(),
                         at_ms: action.created_at_ms,
                         text: text.clone(),
                         cites: cites.clone(),
+                        reply_to: reply_to.clone(),
                     };
                     let position = index.arguments.partition_point(|existing| {
                         (existing.at_ms, existing.id.as_str())
@@ -304,6 +345,7 @@ mod tests {
                 Action::Argue {
                     text: "the day is blue".into(),
                     cites: vec![evidence.id().clone()],
+                    reply_to: None,
                 },
                 1,
             )
@@ -406,6 +448,7 @@ mod tests {
             Action::Argue {
                 text: "short".into(),
                 cites: vec![evidence.id().clone()],
+                reply_to: None,
             },
             1,
         )
@@ -425,6 +468,7 @@ mod tests {
                 Action::Argue {
                     text: "missing".into(),
                     cites: vec![EvidenceId("ab".repeat(32))],
+                    reply_to: None,
                 },
                 1,
             )
@@ -439,6 +483,7 @@ mod tests {
                 Action::Argue {
                     text: "x".repeat(ARGUMENT_CHARS + 1),
                     cites: vec![evidence.id().clone()],
+                    reply_to: None,
                 },
                 1,
             )
@@ -474,6 +519,7 @@ mod tests {
                 Action::Argue {
                     text: "because of this".into(),
                     cites: vec![evidence.id().clone()],
+                    reply_to: None,
                 },
                 1,
             )
@@ -528,6 +574,7 @@ mod tests {
                 Action::Argue {
                     text: "your fact".into(),
                     cites: vec![foreign_evidence.id().clone()],
+                    reply_to: None,
                 },
                 1,
                 SCHEMA,
@@ -563,5 +610,193 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(owned.code, "conflict");
+    }
+
+    #[tokio::test]
+    async fn a_written_reply_is_indexed_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let author = open_at(dir.path(), "b.redb", "peer-b").await;
+        let evidence = evidence_for("peer-b");
+        author.save_evidence(evidence.clone()).await.unwrap();
+        let target = author
+            .write(
+                "argue-1",
+                Action::Argue {
+                    text: "the day is blue".into(),
+                    cites: vec![evidence.id().clone()],
+                    reply_to: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(target.schema, SCHEMA);
+        let page = author.ledger().changes(0, None).await.unwrap();
+
+        let path = dir.path().join("a.redb");
+        let writer = Book::open(config(&path, "peer-a")).await.unwrap();
+        writer.ledger().import(&writer, page.records).await.unwrap();
+        let own = evidence_for("peer-a");
+        writer.save_evidence(own.clone()).await.unwrap();
+        let reply = writer
+            .write(
+                "reply-1",
+                Action::Argue {
+                    text: "answering you".into(),
+                    cites: vec![own.id().clone()],
+                    reply_to: Some(target.id.clone()),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.schema, REPLY_SCHEMA);
+        let indexed = writer.index();
+        let stored = indexed
+            .arguments
+            .iter()
+            .find(|argument| argument.id == reply.id)
+            .unwrap();
+        assert_eq!(stored.reply_to.as_deref(), Some(target.id.as_str()));
+        let answered = indexed
+            .arguments
+            .iter()
+            .find(|argument| argument.id == target.id)
+            .unwrap();
+        assert_eq!(answered.reply_to, None);
+
+        drop(writer);
+        let reopened = Book::open(config(&path, "peer-a")).await.unwrap();
+        assert_eq!(reopened.index(), indexed);
+    }
+
+    #[tokio::test]
+    async fn import_holds_a_reply_until_its_target_and_refuses_self_and_vote() {
+        let dir = tempfile::tempdir().unwrap();
+        let author = open_at(dir.path(), "b.redb", "peer-b").await;
+        let evidence = evidence_for("peer-b");
+        let saved = author.save_evidence(evidence.clone()).await.unwrap();
+        let target = author
+            .write(
+                "argue-1",
+                Action::Argue {
+                    text: "first".into(),
+                    cites: vec![evidence.id().clone()],
+                    reply_to: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let vote = author
+            .write(
+                "vote-1",
+                Action::Vote {
+                    colour: Colour::Blue,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let before_reply = author.ledger().changes(0, None).await.unwrap();
+        let replier = open_at(dir.path(), "c.redb", "peer-c").await;
+        let reply = replier
+            .ledger()
+            .execute(
+                &replier,
+                "reply-1",
+                Action::Argue {
+                    text: "answering".into(),
+                    cites: vec![],
+                    reply_to: Some(target.id.clone()),
+                },
+                1,
+                REPLY_SCHEMA,
+            )
+            .await
+            .unwrap();
+
+        let reader = open_at(dir.path(), "a.redb", "peer-a").await;
+        let early = reader
+            .ledger()
+            .import(&reader, vec![Record::from(reply.clone())])
+            .await
+            .unwrap_err();
+        assert_eq!(early.code, "missing_reference");
+        assert!(early.message.contains("UnknownReply"));
+        assert!(reader.index().arguments.is_empty());
+
+        let prelude: Vec<Record> = before_reply
+            .records
+            .into_iter()
+            .filter(|record| record.id() == saved.id || record.id() == target.id)
+            .collect();
+        reader.ledger().import(&reader, prelude).await.unwrap();
+        assert_eq!(
+            reader
+                .ledger()
+                .import(&reader, vec![Record::from(reply)])
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = reader
+            .index()
+            .arguments
+            .into_iter()
+            .find(|argument| argument.reply_to.is_some())
+            .unwrap();
+        assert_eq!(stored.reply_to.as_deref(), Some(target.id.as_str()));
+
+        let self_reply = author
+            .ledger()
+            .execute(
+                &author,
+                "self-reply",
+                Action::Argue {
+                    text: "myself".into(),
+                    cites: vec![],
+                    reply_to: Some(target.id.clone()),
+                },
+                1,
+                REPLY_SCHEMA,
+            )
+            .await
+            .unwrap();
+        let self_reply = reader
+            .ledger()
+            .import(&reader, vec![Record::from(self_reply)])
+            .await
+            .unwrap_err();
+        assert_eq!(self_reply.code, "invalid_action");
+        assert!(self_reply.message.contains("SelfReply"));
+
+        reader
+            .ledger()
+            .import(&reader, vec![Record::from(vote.clone())])
+            .await
+            .unwrap();
+        let vote_reply = author
+            .ledger()
+            .execute(
+                &author,
+                "vote-reply",
+                Action::Argue {
+                    text: "not an argument".into(),
+                    cites: vec![],
+                    reply_to: Some(vote.id.clone()),
+                },
+                1,
+                REPLY_SCHEMA,
+            )
+            .await
+            .unwrap();
+        let vote_reply = reader
+            .ledger()
+            .import(&reader, vec![Record::from(vote_reply)])
+            .await
+            .unwrap_err();
+        assert_eq!(vote_reply.code, "invalid_action");
+        assert!(vote_reply.message.contains("ReplyToNonArgument"));
     }
 }
