@@ -7,6 +7,7 @@ use std::time::Duration;
 use plumage::config::PeerConfig;
 use plumage::error::Error;
 use plumage::fetch::HttpSource;
+use plumage::lab;
 use plumage::peer;
 use tokio::sync::watch;
 
@@ -34,6 +35,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("lab") => {
+            let rest: Vec<String> = args.collect();
+            match run_lab(&rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Some(_) => {
             print_usage();
             ExitCode::from(1)
@@ -44,6 +55,9 @@ fn main() -> ExitCode {
 fn print_usage() {
     println!("plumage {}", env!("CARGO_PKG_VERSION"));
     println!("plumage peer <config.json>");
+    println!(
+        "plumage lab --dir <path> [--peers <n>] [--model-url <url>] [--day <YYYY-MM-DD>] [--days <n>] [--speed <n>]"
+    );
 }
 
 #[tokio::main]
@@ -59,6 +73,18 @@ async fn run_peer(path: &str) -> Result<(), Error> {
         watch_signals(sender).await;
     });
     peer::run(config, source, receiver).await
+}
+
+#[tokio::main]
+async fn run_lab(args: &[String]) -> Result<(), Error> {
+    let config = lab::parse(args)?;
+    let (sender, receiver) = watch::channel(false);
+    tokio::spawn(async move {
+        watch_signals(sender).await;
+    });
+    let report = lab::run(config, receiver).await?;
+    print!("{report}");
+    Ok(())
 }
 
 async fn watch_signals(sender: watch::Sender<bool>) {
