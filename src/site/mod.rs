@@ -7,12 +7,14 @@ mod archive;
 mod day;
 mod flock;
 mod front;
+mod how;
 mod layout;
 
 pub use archive::render_archive;
 pub use day::render_day;
 pub use flock::render_flock;
 pub use front::render_front;
+pub use how::render_how;
 pub use layout::formula;
 
 use std::collections::BTreeMap;
