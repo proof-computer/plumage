@@ -337,6 +337,7 @@ async fn wait_until_stop(
             return Ok(());
         }
         if !reported && advertisement.is_file() && status_ok(client, status_url).await {
+            eprintln!("plumage readiness site=ok advertisement=ok");
             tokio::select! {
                 biased;
                 _ = until_stop(shutdown) => return Ok(()),
