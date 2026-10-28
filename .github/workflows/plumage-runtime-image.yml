@@ -1,0 +1,59 @@
+name: Build plumage runtime image
+# Bakes the static `plumage` launcher into the maintained debian-trixie
+# rootfs and uploads the image to Liskov against the V5 source document
+# `.liskov/plumage.source.v5.json`. Dispatch on `main` after the
+# Application exists; its source binding must name this workflow and that
+# manifest path, or the upload is refused and nothing changes.
+# The image carries no model, server or payload bytes; `plumage launch`
+# fetches the pinned payload named by the V5 policy variables at job start.
+# The `evidence` job prints the build's publication evidence; its
+# `artifact-digest` is what `.liskov/plumage.v5.json` pins.
+on:
+  workflow_dispatch:
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+jobs:
+  image:
+    uses: proof-computer/liskov-github-actions/.github/workflows/cargo-runtime-image.yml@v2
+    with:
+      application-id: plumage
+      manifest-path: .liskov/plumage.source.v5.json
+      working-directory: .
+      binary-name: plumage
+      install-path: /usr/local/bin/plumage
+      base-image-url: https://github.com/proof-computer/liskov-runtime-images/releases/download/v0.1.0-rc.12/liskov-runtime-image-debian-trixie-aarch64.tar.xz
+      base-image-sha256: 0639e88db6b46cef6091acafe35dfb1b59c5e354463d969f1a9509451d118377
+      base-attestation-repository: proof-computer/liskov-runtime-images
+      base-attestation-source-digest: d3a7b61e7e2acb2e2f686c6fc1379d2ee74ea582
+      base-attestation-signer-workflow: proof-computer/liskov-runtime-images/.github/workflows/ci.yml
+      attest-runtime-image: false
+  evidence:
+    name: Publication evidence
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions: {}
+    env:
+      LISKOV_PLUMAGE_ARTIFACT_DIGEST: ${{ needs.image.outputs.artifact-digest }}
+      LISKOV_PLUMAGE_SOURCE_REPOSITORY: ${{ needs.image.outputs.source-repository }}
+      LISKOV_PLUMAGE_SOURCE_REF: ${{ needs.image.outputs.source-ref }}
+      LISKOV_PLUMAGE_SOURCE_COMMIT: ${{ needs.image.outputs.source-commit }}
+      LISKOV_PLUMAGE_SOURCE_WORKFLOW_IDENTITY: ${{ needs.image.outputs.source-workflow-identity }}
+      LISKOV_PLUMAGE_BINDING_REVISION: ${{ needs.image.outputs.binding-revision }}
+      LISKOV_PLUMAGE_REVOCATION_EPOCH: ${{ needs.image.outputs.revocation-epoch }}
+    steps:
+      - name: Print the build's publication evidence
+        run: |
+          {
+            printf '### Publication evidence\n\n'
+            printf '| Output | Value |\n| --- | --- |\n'
+            printf '| `%s` | `%s` |\n' \
+              artifact-digest "$LISKOV_PLUMAGE_ARTIFACT_DIGEST" \
+              source-repository "$LISKOV_PLUMAGE_SOURCE_REPOSITORY" \
+              source-ref "$LISKOV_PLUMAGE_SOURCE_REF" \
+              source-commit "$LISKOV_PLUMAGE_SOURCE_COMMIT" \
+              source-workflow-identity "$LISKOV_PLUMAGE_SOURCE_WORKFLOW_IDENTITY" \
+              binding-revision "$LISKOV_PLUMAGE_BINDING_REVISION" \
+              revocation-epoch "$LISKOV_PLUMAGE_REVOCATION_EPOCH"
+          } >> "$GITHUB_STEP_SUMMARY"

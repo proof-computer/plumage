@@ -1,0 +1,25 @@
+{
+  "schema": "proof.liskov.application-manifest",
+  "schemaVersion": 5,
+  "applicationId": "plumage",
+  "metadata": {
+    "description": "Build input only: plumage-runtime-image.yml uploads the launcher image against this document. The published policy is the sibling plumage.v5.json, which pins the artifact digest the build returns.",
+    "labels": ["plumage", "build-input"]
+  },
+  "release": { "mode": "source" },
+  "runtime": {
+    "kind": "native_image",
+    "image": { "catalog": "liskov-runtime-images", "name": "debian-trixie", "version": "0.1" },
+    "entrypoint": { "executable": "/usr/local/bin/plumage", "args": ["launch"] }
+  },
+  "execution": { "mode": "continuous" },
+  "deployment": {
+    "schedule": { "duration": "45m" },
+    "spend": {
+      "unit": "service_credit_micros",
+      "perJob": "1200000",
+      "rate": { "amount": "6000000", "window": "1d" }
+    }
+  },
+  "state": { "mode": "off" }
+}
