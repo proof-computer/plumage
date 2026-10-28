@@ -1,0 +1,141 @@
+{
+  "schema": "proof.liskov.application-manifest",
+  "schemaVersion": 5,
+  "applicationId": "plumage",
+  "metadata": {
+    "description": "Two plumage peers on the pinned Qwen3.5-4B model. Unpublished draft: the artifact digest is all zeroes and the payload variables are empty until fill-v5-release.py binds a build. Spend caps are Planetarium's; the owner confirms them at publish.",
+    "labels": [
+      "plumage",
+      "native",
+      "inference",
+      "ssh"
+    ]
+  },
+  "release": {
+    "mode": "pinned",
+    "artifact": {
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "runtime": {
+    "kind": "native_image",
+    "image": {
+      "catalog": "liskov-runtime-images",
+      "name": "debian-trixie",
+      "version": "0.1"
+    },
+    "entrypoint": {
+      "executable": "/usr/local/bin/plumage",
+      "args": [
+        "launch"
+      ]
+    }
+  },
+  "execution": {
+    "mode": "continuous"
+  },
+  "deployment": {
+    "jobs": 2,
+    "schedule": {
+      "duration": "2h",
+      "phasing": {
+        "mode": "evenly_spaced",
+        "jobsPerPhase": 1
+      }
+    },
+    "spend": {
+      "unit": "service_credit_micros",
+      "perJob": "1200000",
+      "rate": {
+        "amount": "6000000",
+        "window": "1d"
+      }
+    },
+    "lifecycle": {
+      "renewal": {
+        "leadTime": {
+          "mode": "automatic"
+        }
+      },
+      "update": {
+        "timing": "immediate",
+        "existingJobs": {
+          "mode": "stop_when_successor_ready"
+        }
+      }
+    },
+    "placement": {
+      "minimums": {
+        "memory": "8GiB",
+        "storage": "8GiB"
+      }
+    }
+  },
+  "state": {
+    "mode": "off"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true
+    }
+  },
+  "configuration": {
+    "variables": [
+      {
+        "name": "LISKOV_PLUMAGE_HOME",
+        "source": "literal",
+        "value": "/app"
+      },
+      {
+        "name": "LISKOV_PLUMAGE_PAYLOAD_URL",
+        "source": "literal",
+        "value": ""
+      },
+      {
+        "name": "LISKOV_PLUMAGE_PAYLOAD_SHA256",
+        "source": "literal",
+        "value": ""
+      },
+      {
+        "name": "LISKOV_PLUMAGE_PAYLOAD_BYTES",
+        "source": "literal",
+        "value": ""
+      },
+      {
+        "name": "LISKOV_PLUMAGE_PAYLOAD_PART_SHA256",
+        "source": "literal",
+        "value": ""
+      },
+      {
+        "name": "LISKOV_PLUMAGE_PAYLOAD_PART_BYTES",
+        "source": "literal",
+        "value": ""
+      }
+    ],
+    "secrets": [
+      {
+        "secretId": "plumage-peer-token",
+        "required": true,
+        "destination": {
+          "kind": "environment",
+          "name": "LISKOV_PLUMAGE_PEER_TOKEN"
+        }
+      },
+      {
+        "secretId": "plumage-cloudflared-token",
+        "required": true,
+        "destination": {
+          "kind": "environment",
+          "name": "LISKOV_PLUMAGE_CLOUDFLARED_TOKEN"
+        }
+      }
+    ]
+  },
+  "access": {
+    "ssh": {
+      "provider": {
+        "kind": "liskov_managed"
+      }
+    }
+  }
+}

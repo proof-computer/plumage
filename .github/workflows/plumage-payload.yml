@@ -1,0 +1,243 @@
+name: Build and pin plumage payload
+# Builds the ARM peer and the pinned CPU-only inference server, packs them with
+# `scripts/package-acurast.py` into the deterministic payload archive, pins
+# the exact bytes through the no-spend IPFS path and prints the values the V5
+# policy needs: part URLs, part digests and sizes, and the whole archive's
+# SHA-256 and byte size. The proxy accepts only a few megabytes per upload, so
+# the archive is pinned as ordered parts the launcher reassembles. No model
+# bytes are packed; weights are immutable references the launcher downloads on
+# the phone. Pinning is not publication, launch, or processor acceptance.
+#
+# With `cloudflared` set, the payload also carries the pinned named-tunnel
+# connector and a pinned CA bundle, and both `deployment.json` and
+# `peer.json`'s `liskov.cloudflared` enable that same connector. The
+# maintained `debian-trixie` image is built from `debian:trixie-slim`, which
+# ships no CA store, so the bundle travels with the payload. Such a payload
+# refuses to start without `LISKOV_PLUMAGE_CLOUDFLARED_TOKEN` in the job's
+# secret environment: bind it only to a policy that declares that secret.
+on:
+  workflow_dispatch:
+    inputs:
+      memory-floor-mib:
+        description: "Available-memory admission floor in MiB (measured model+context+peer peak with headroom)."
+        required: true
+        default: "4096"
+      threads:
+        description: "Inference server threads (1-8)."
+        required: true
+        default: "4"
+      part-bytes:
+        description: "Maximum bytes per pinned part (the no-spend proxy refused 8 MB and accepted 4 MB on 2026-10-09)."
+        required: true
+        default: "4000000"
+      cloudflared:
+        description: "Carry the pinned cloudflared connector and enable it in the peer config (the policy must then deliver the tunnel token secret)."
+        type: boolean
+        required: true
+        default: true
+      cloudflared-protocol:
+        description: "Connector transport when cloudflared is carried."
+        type: choice
+        options: ["auto", "quic", "http2"]
+        required: true
+        default: "auto"
+permissions:
+  contents: read
+  id-token: write
+env:
+  LISKOV_IPFS_PROXY: https://ipfs-proxy.acurast.prod.gke.papers.tech
+  LISKOV_IPFS_GATEWAY: https://gateway.pinata.cloud/ipfs
+  # The official static AArch64 release asset, pinned by size and digest
+  # (the release API's published digest, re-checked from the bytes here).
+  CLOUDFLARED_VERSION: "2026.10.4"
+  CLOUDFLARED_BYTES: "37660620"
+  CLOUDFLARED_SHA256: 2b7203b4fb0ba28a0c1e12f8855ce2c25f76d266a8d5edafac5540b6812acff6
+  # curl's dated extract of the Mozilla root store, pinned the same way.
+  CA_BUNDLE_URL: https://curl.se/ca/cacert-2026-10-20.pem
+  CA_BUNDLE_BYTES: "200116"
+  CA_BUNDLE_SHA256: 796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe
+jobs:
+  payload:
+    # The same runner as CI's AArch64 job, whose caches this build restores.
+    runs-on: blacksmith-16vcpu-ubuntu-2404-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned toolchain
+        run: rustup show
+      # Dependency artifacts only. This build restores what CI on `main`
+      # published and publishes nothing.
+      - name: Restore reusable Cargo artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: plumage-v1
+          shared-key: aarch64
+          save-if: 'false'
+      - name: Build and strip the ARM peer
+        env:
+          LISKOV_PLUMAGE_BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          cargo build --locked --release --bin plumage
+          strip --strip-all target/release/plumage
+          ./target/release/plumage
+      # The server is one pinned commit built by one script, so its release
+      # directory is reused until either changes. Only CI on `main` publishes it.
+      - name: Restore the pinned inference server release
+        id: inference
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: inference-release
+          key: plumage-inference-server-v1-${{ runner.arch }}-d2e54583c7452353eb35d40431281f6ee984332f-${{ hashFiles('scripts/build-inference-server.py') }}
+      - name: Check out the pinned inference source
+        if: steps.inference.outputs.cache-hit != 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: d2e54583c7452353eb35d40431281f6ee984332f
+          path: inference-source
+          persist-credentials: false
+      - name: Build the portable CPU-only ARM inference server
+        if: steps.inference.outputs.cache-hit != 'true'
+        run: python3 scripts/build-inference-server.py --source inference-source --build-dir inference-build --release-dir inference-release --jobs "$(nproc)"
+      - name: Smoke the inference server
+        run: ./inference-release/llama-server --version
+      - name: Fetch the pinned connector and CA bundle
+        if: inputs.cloudflared
+        run: |
+          set -euo pipefail
+          mkdir -p connector
+          fetch() { # url, output, bytes, sha256
+            curl --silent --show-error --fail --location --proto '=https' --max-time 300 --retry 3 --output "$2" "$1"
+            [ "$(stat -c %s "$2")" = "$3" ] || { echo "size mismatch for $2" >&2; exit 1; }
+            echo "$4  $2" | sha256sum --check --strict -
+          }
+          fetch "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-arm64" \
+            connector/cloudflared "$CLOUDFLARED_BYTES" "$CLOUDFLARED_SHA256"
+          fetch "$CA_BUNDLE_URL" connector/ca-certificates.crt "$CA_BUNDLE_BYTES" "$CA_BUNDLE_SHA256"
+          chmod 0755 connector/cloudflared
+          # This runner is AArch64, so the exact bytes run here. Neither probe
+          # connects a tunnel.
+          version=$(./connector/cloudflared --version)
+          usage=$(./connector/cloudflared tunnel run --help)
+          echo "$version"
+          [[ "$version" == *"version ${CLOUDFLARED_VERSION} "* ]]
+          [[ "$usage" == *"--token-file"* ]]
+      - name: Pack the payload
+        id: pack
+        env:
+          CLOUDFLARED: ${{ inputs.cloudflared }}
+          CLOUDFLARED_PROTOCOL: ${{ inputs.cloudflared-protocol }}
+          MEMORY_FLOOR_MIB: ${{ inputs.memory-floor-mib }}
+          THREADS: ${{ inputs.threads }}
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          connector=()
+          if [ "$CLOUDFLARED" = "true" ]; then
+            connector=(
+              --cloudflared "$PWD/connector/cloudflared"
+              --cloudflared-sha256 "$CLOUDFLARED_SHA256"
+              --cloudflared-protocol "$CLOUDFLARED_PROTOCOL"
+              --cloudflared-ca-bundle "$PWD/connector/ca-certificates.crt"
+            )
+          fi
+          python3 scripts/package-acurast.py \
+            --plumage "$PWD/target/release/plumage" \
+            --server-dir "$PWD/inference-release" \
+            --server-revision d2e54583c7452353eb35d40431281f6ee984332f \
+            --model-profile qwen35-4b \
+            --model-sha256 00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4 \
+            --model-label Qwen3.5-4B-Q4_K_M \
+            --model-repository unsloth/Qwen3.5-4B-GGUF \
+            --model-revision e87f176479d0855a907a41277aca2f8ee7a09523 \
+            --model-license Apache-2.0 \
+            --threads "$THREADS" --min-available-memory-mib "$MEMORY_FLOOR_MIB" \
+            "${connector[@]}" \
+            --out "$PWD/payload/plumage-payload.tar.gz" | tee payload/pack.json
+          # The two cloudflared blocks are one connector, or both absent.
+          peer_cloud=$(tar -xzOf payload/plumage-payload.tar.gz peer.json | jq -S -c '.liskov.cloudflared')
+          deployment_cloud=$(tar -xzOf payload/plumage-payload.tar.gz deployment.json | jq -S -c '.cloudflared')
+          [ "$peer_cloud" = "$deployment_cloud" ] || { echo "cloudflared blocks differ" >&2; exit 1; }
+          enabled=$(tar -xzOf payload/plumage-payload.tar.gz peer.json | jq -r '.liskov.cloudflared != null')
+          [ "$enabled" = "$CLOUDFLARED" ] || { echo "connector state is $enabled, expected $CLOUDFLARED" >&2; exit 1; }
+          echo "cloudflared=${enabled}" >> "$GITHUB_OUTPUT"
+          sha256=$(sha256sum payload/plumage-payload.tar.gz | cut -d ' ' -f 1)
+          bytes=$(stat -c %s payload/plumage-payload.tar.gz)
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          echo "bytes=${bytes}" >> "$GITHUB_OUTPUT"
+      - name: Pin the exact payload bytes in parts (no-spend IPFS)
+        id: pin
+        env:
+          PART_BYTES: ${{ inputs.part-bytes }}
+          SHA256: ${{ steps.pack.outputs.sha256 }}
+          BYTES: ${{ steps.pack.outputs.bytes }}
+          SOURCE: ${{ github.sha }}
+          CLOUDFLARED: ${{ steps.pack.outputs.cloudflared }}
+        run: |
+          set -euo pipefail
+          cd payload
+          [[ "$PART_BYTES" =~ ^[0-9]+$ ]] && [ "$PART_BYTES" -ge 1000000 ] && [ "$PART_BYTES" -le 8000000 ]
+          split --bytes="$PART_BYTES" --numeric-suffixes=0 --suffix-length=2 plumage-payload.tar.gz plumage-payload.part-
+          parts=(plumage-payload.part-*)
+          [ "${#parts[@]}" -le 64 ]
+          urls=(); digests=(); sizes=(); cids=()
+          for part in "${parts[@]}"; do
+            digest=$(sha256sum "$part" | cut -d ' ' -f 1)
+            size=$(stat -c %s "$part")
+            cid=""
+            for attempt in 1 2 3; do
+              response=$(curl --silent --show-error --fail --max-time 300 \
+                -X POST -F "file=@${part}" "${LISKOV_IPFS_PROXY}/pinning/pinFileToIPFS") && \
+                cid=$(printf '%s' "$response" | jq -r '.IpfsHash // empty') && [ -n "$cid" ] && break
+              cid=""; sleep 10
+            done
+            [ -n "$cid" ] || { echo "pin failed for $part" >&2; exit 1; }
+            url="${LISKOV_IPFS_GATEWAY}/${cid}"
+            # The gateway must serve exactly the bytes that were pinned.
+            ok=0
+            for attempt in 1 2 3 4 5 6; do
+              if curl --silent --fail --location --max-time 300 --output fetched.part "$url" \
+                && cmp --silent fetched.part "$part"; then ok=1; break; fi
+              sleep 10
+            done
+            rm -f fetched.part
+            [ "$ok" = 1 ] || { echo "gateway bytes differ for $part ($url)" >&2; exit 1; }
+            urls+=("$url"); digests+=("$digest"); sizes+=("$size"); cids+=("$cid")
+            echo "pinned $part -> $url ($size bytes)"
+          done
+          connector=null
+          if [ "$CLOUDFLARED" = "true" ]; then
+            connector=$(jq -n --arg version "$CLOUDFLARED_VERSION" --arg sha256 "$CLOUDFLARED_SHA256" --arg ca "$CA_BUNDLE_SHA256" \
+              '{version:$version, sha256:$sha256, ca_bundle_sha256:$ca, token_env:"LISKOV_PLUMAGE_CLOUDFLARED_TOKEN"}')
+          fi
+          jq -n --arg source "$SOURCE" --arg sha256 "$SHA256" --argjson bytes "$BYTES" --argjson connector "$connector" \
+            --argjson urls "$(printf '%s\n' "${urls[@]}" | jq -R . | jq -s .)" \
+            --argjson digests "$(printf '%s\n' "${digests[@]}" | jq -R . | jq -s .)" \
+            --argjson sizes "$(printf '%s\n' "${sizes[@]}" | jq -R 'tonumber' | jq -s .)" \
+            --argjson cids "$(printf '%s\n' "${cids[@]}" | jq -R . | jq -s .)" \
+            '{format:"plumage.payload-identity.v1", source:$source, sha256:$sha256, bytes:$bytes, cloudflared:$connector,
+              parts:[range($urls|length) as $i | {url:$urls[$i], sha256:$digests[$i], bytes:$sizes[$i], cid:$cids[$i]}]}' \
+            > payload-identity.json
+          cat payload-identity.json
+          {
+            echo '## Plumage payload'
+            echo
+            echo "Archive \`${SHA256}\` (${BYTES} bytes) pinned as ${#parts[@]} part(s). Download \`payload-identity.json\` from this run's artifact and bind it with:"
+            echo
+            echo '```sh'
+            echo "python3 scripts/fill-v5-release.py --payload-identity payload-identity.json --artifact-digest sha256:<runtime image bootstrap digest>"
+            echo '```'
+            if [ "$CLOUDFLARED" = "true" ]; then
+              echo
+              echo "This payload starts cloudflared ${CLOUDFLARED_VERSION}. It refuses to start unless the policy delivers \`LISKOV_PLUMAGE_CLOUDFLARED_TOKEN\` as a secret."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain the payload and its identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plumage-payload-${{ github.sha }}
+          path: |
+            payload/plumage-payload.tar.gz
+            payload/pack.json
+            payload/payload-identity.json
+          if-no-files-found: error
+          retention-days: 30

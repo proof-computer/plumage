@@ -1,0 +1,74 @@
+{
+  "image": "the plumage binary this repository builds",
+  "source": "src/config.rs PeerConfig and liskov-cargo-harness Deployment",
+  "why": "plumage launch parses peer.json with PeerConfig and deployment.json with the harness Deployment, both deny_unknown_fields. A key outside these lists stops the job at startup. The packer also refuses peer_id, token, advertisement_file and peers, and refuses an embedding. Regenerate when those structs change.",
+  "peer_json": [
+    "activation_interval_ms",
+    "advertisement_file",
+    "clock",
+    "context_tokens",
+    "data_dir",
+    "fetch_timeout_seconds",
+    "inference_timeout_seconds",
+    "last_day",
+    "listen",
+    "liskov",
+    "max_steps",
+    "memory_budget",
+    "memory_item_tokens",
+    "model_url",
+    "output_tokens",
+    "peer_id",
+    "peers",
+    "request_timeout_seconds",
+    "site_dir",
+    "sync_interval_ms",
+    "token",
+    "token_budget"
+  ],
+  "peer_json_clock": [
+    "real_start_ms",
+    "sim_start_ms",
+    "speed"
+  ],
+  "peer_json_liskov": [
+    "cloudflared",
+    "site_listen"
+  ],
+  "peer_json_cloudflared": [
+    "binary",
+    "ca_bundle",
+    "metrics",
+    "protocol"
+  ],
+  "deployment_json": [
+    "cache_ram_mib",
+    "cloudflared",
+    "context_tokens",
+    "download_seconds",
+    "embedding",
+    "extra_files",
+    "min_available_memory_mib",
+    "model",
+    "model_port",
+    "peer",
+    "peer_config",
+    "ready_seconds",
+    "reserved_ports",
+    "server",
+    "server_files",
+    "server_revision",
+    "shutdown_seconds",
+    "threads"
+  ],
+  "deployment_embedding": [
+    "model",
+    "port"
+  ],
+  "deployment_input": [
+    "bytes",
+    "path",
+    "sha256",
+    "url"
+  ]
+}

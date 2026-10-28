@@ -21,7 +21,16 @@ documentation and delivery; this file governs local conventions.
   helper directory files.
 - `rust-toolchain.toml`: the pinned development and CI toolchain.
 - `.github/workflows/ci.yml`: the local checks repeated on GitHub, on x86_64
-  and native AArch64.
+  and native AArch64. It also compiles the payload scripts and runs
+  `scripts/test-package-acurast.py`.
+- `.github/workflows/plumage-runtime-image.yml`: dispatch-only image build.
+  It does not publish the policy.
+- `.github/workflows/plumage-payload.yml`: dispatch-only payload build and
+  no-spend pin.
+- `scripts/`: the payload packer, its test, the inference-server build and
+  the V5 release filler.
+- `.liskov/`: the source manifest, the unpublished policy draft and the
+  launcher field allowlist.
 
 ## Rules
 
