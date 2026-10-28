@@ -49,13 +49,13 @@ env:
   LISKOV_IPFS_GATEWAY: https://gateway.pinata.cloud/ipfs
   # The official static AArch64 release asset, pinned by size and digest
   # (the release API's published digest, re-checked from the bytes here).
-  CLOUDFLARED_VERSION: "2026.10.4"
-  CLOUDFLARED_BYTES: "37660620"
-  CLOUDFLARED_SHA256: 2b7203b4fb0ba28a0c1e12f8855ce2c25f76d266a8d5edafac5540b6812acff6
+  LISKOV_PLUMAGE_CLOUDFLARED_VERSION: "2026.10.4"
+  LISKOV_PLUMAGE_CLOUDFLARED_BYTES: "37660620"
+  LISKOV_PLUMAGE_CLOUDFLARED_SHA256: 2b7203b4fb0ba28a0c1e12f8855ce2c25f76d266a8d5edafac5540b6812acff6
   # curl's dated extract of the Mozilla root store, pinned the same way.
-  CA_BUNDLE_URL: https://curl.se/ca/cacert-2026-10-20.pem
-  CA_BUNDLE_BYTES: "200116"
-  CA_BUNDLE_SHA256: 796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe
+  LISKOV_PLUMAGE_CA_BUNDLE_URL: https://curl.se/ca/cacert-2026-10-20.pem
+  LISKOV_PLUMAGE_CA_BUNDLE_BYTES: "200116"
+  LISKOV_PLUMAGE_CA_BUNDLE_SHA256: 796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe
 jobs:
   payload:
     # The same runner as CI's AArch64 job, whose caches this build restores.
@@ -110,33 +110,33 @@ jobs:
             [ "$(stat -c %s "$2")" = "$3" ] || { echo "size mismatch for $2" >&2; exit 1; }
             echo "$4  $2" | sha256sum --check --strict -
           }
-          fetch "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-arm64" \
-            connector/cloudflared "$CLOUDFLARED_BYTES" "$CLOUDFLARED_SHA256"
-          fetch "$CA_BUNDLE_URL" connector/ca-certificates.crt "$CA_BUNDLE_BYTES" "$CA_BUNDLE_SHA256"
+          fetch "https://github.com/cloudflare/cloudflared/releases/download/${LISKOV_PLUMAGE_CLOUDFLARED_VERSION}/cloudflared-linux-arm64" \
+            connector/cloudflared "$LISKOV_PLUMAGE_CLOUDFLARED_BYTES" "$LISKOV_PLUMAGE_CLOUDFLARED_SHA256"
+          fetch "$LISKOV_PLUMAGE_CA_BUNDLE_URL" connector/ca-certificates.crt "$LISKOV_PLUMAGE_CA_BUNDLE_BYTES" "$LISKOV_PLUMAGE_CA_BUNDLE_SHA256"
           chmod 0755 connector/cloudflared
           # This runner is AArch64, so the exact bytes run here. Neither probe
           # connects a tunnel.
           version=$(./connector/cloudflared --version)
           usage=$(./connector/cloudflared tunnel run --help)
           echo "$version"
-          [[ "$version" == *"version ${CLOUDFLARED_VERSION} "* ]]
+          [[ "$version" == *"version ${LISKOV_PLUMAGE_CLOUDFLARED_VERSION} "* ]]
           [[ "$usage" == *"--token-file"* ]]
       - name: Pack the payload
         id: pack
         env:
-          CLOUDFLARED: ${{ inputs.cloudflared }}
-          CLOUDFLARED_PROTOCOL: ${{ inputs.cloudflared-protocol }}
-          MEMORY_FLOOR_MIB: ${{ inputs.memory-floor-mib }}
-          THREADS: ${{ inputs.threads }}
+          LISKOV_PLUMAGE_CLOUDFLARED: ${{ inputs.cloudflared }}
+          LISKOV_PLUMAGE_CLOUDFLARED_PROTOCOL: ${{ inputs.cloudflared-protocol }}
+          LISKOV_PLUMAGE_MEMORY_FLOOR_MIB: ${{ inputs.memory-floor-mib }}
+          LISKOV_PLUMAGE_THREADS: ${{ inputs.threads }}
         run: |
           set -euo pipefail
           mkdir -p payload
           connector=()
-          if [ "$CLOUDFLARED" = "true" ]; then
+          if [ "$LISKOV_PLUMAGE_CLOUDFLARED" = "true" ]; then
             connector=(
               --cloudflared "$PWD/connector/cloudflared"
-              --cloudflared-sha256 "$CLOUDFLARED_SHA256"
-              --cloudflared-protocol "$CLOUDFLARED_PROTOCOL"
+              --cloudflared-sha256 "$LISKOV_PLUMAGE_CLOUDFLARED_SHA256"
+              --cloudflared-protocol "$LISKOV_PLUMAGE_CLOUDFLARED_PROTOCOL"
               --cloudflared-ca-bundle "$PWD/connector/ca-certificates.crt"
             )
           fi
@@ -150,7 +150,7 @@ jobs:
             --model-repository unsloth/Qwen3.5-4B-GGUF \
             --model-revision e87f176479d0855a907a41277aca2f8ee7a09523 \
             --model-license Apache-2.0 \
-            --threads "$THREADS" --min-available-memory-mib "$MEMORY_FLOOR_MIB" \
+            --threads "$LISKOV_PLUMAGE_THREADS" --min-available-memory-mib "$LISKOV_PLUMAGE_MEMORY_FLOOR_MIB" \
             "${connector[@]}" \
             --out "$PWD/payload/plumage-payload.tar.gz" | tee payload/pack.json
           # The two cloudflared blocks are one connector, or both absent.
@@ -158,7 +158,7 @@ jobs:
           deployment_cloud=$(tar -xzOf payload/plumage-payload.tar.gz deployment.json | jq -S -c '.cloudflared')
           [ "$peer_cloud" = "$deployment_cloud" ] || { echo "cloudflared blocks differ" >&2; exit 1; }
           enabled=$(tar -xzOf payload/plumage-payload.tar.gz peer.json | jq -r '.liskov.cloudflared != null')
-          [ "$enabled" = "$CLOUDFLARED" ] || { echo "connector state is $enabled, expected $CLOUDFLARED" >&2; exit 1; }
+          [ "$enabled" = "$LISKOV_PLUMAGE_CLOUDFLARED" ] || { echo "connector state is $enabled, expected $LISKOV_PLUMAGE_CLOUDFLARED" >&2; exit 1; }
           echo "cloudflared=${enabled}" >> "$GITHUB_OUTPUT"
           sha256=$(sha256sum payload/plumage-payload.tar.gz | cut -d ' ' -f 1)
           bytes=$(stat -c %s payload/plumage-payload.tar.gz)
@@ -167,16 +167,16 @@ jobs:
       - name: Pin the exact payload bytes in parts (no-spend IPFS)
         id: pin
         env:
-          PART_BYTES: ${{ inputs.part-bytes }}
-          SHA256: ${{ steps.pack.outputs.sha256 }}
-          BYTES: ${{ steps.pack.outputs.bytes }}
-          SOURCE: ${{ github.sha }}
-          CLOUDFLARED: ${{ steps.pack.outputs.cloudflared }}
+          LISKOV_PLUMAGE_PART_BYTES: ${{ inputs.part-bytes }}
+          LISKOV_PLUMAGE_SHA256: ${{ steps.pack.outputs.sha256 }}
+          LISKOV_PLUMAGE_BYTES: ${{ steps.pack.outputs.bytes }}
+          LISKOV_PLUMAGE_SOURCE: ${{ github.sha }}
+          LISKOV_PLUMAGE_CLOUDFLARED: ${{ steps.pack.outputs.cloudflared }}
         run: |
           set -euo pipefail
           cd payload
-          [[ "$PART_BYTES" =~ ^[0-9]+$ ]] && [ "$PART_BYTES" -ge 1000000 ] && [ "$PART_BYTES" -le 8000000 ]
-          split --bytes="$PART_BYTES" --numeric-suffixes=0 --suffix-length=2 plumage-payload.tar.gz plumage-payload.part-
+          [[ "$LISKOV_PLUMAGE_PART_BYTES" =~ ^[0-9]+$ ]] && [ "$LISKOV_PLUMAGE_PART_BYTES" -ge 1000000 ] && [ "$LISKOV_PLUMAGE_PART_BYTES" -le 8000000 ]
+          split --bytes="$LISKOV_PLUMAGE_PART_BYTES" --numeric-suffixes=0 --suffix-length=2 plumage-payload.tar.gz plumage-payload.part-
           parts=(plumage-payload.part-*)
           [ "${#parts[@]}" -le 64 ]
           urls=(); digests=(); sizes=(); cids=()
@@ -205,11 +205,11 @@ jobs:
             echo "pinned $part -> $url ($size bytes)"
           done
           connector=null
-          if [ "$CLOUDFLARED" = "true" ]; then
-            connector=$(jq -n --arg version "$CLOUDFLARED_VERSION" --arg sha256 "$CLOUDFLARED_SHA256" --arg ca "$CA_BUNDLE_SHA256" \
+          if [ "$LISKOV_PLUMAGE_CLOUDFLARED" = "true" ]; then
+            connector=$(jq -n --arg version "$LISKOV_PLUMAGE_CLOUDFLARED_VERSION" --arg sha256 "$LISKOV_PLUMAGE_CLOUDFLARED_SHA256" --arg ca "$LISKOV_PLUMAGE_CA_BUNDLE_SHA256" \
               '{version:$version, sha256:$sha256, ca_bundle_sha256:$ca, token_env:"LISKOV_PLUMAGE_CLOUDFLARED_TOKEN"}')
           fi
-          jq -n --arg source "$SOURCE" --arg sha256 "$SHA256" --argjson bytes "$BYTES" --argjson connector "$connector" \
+          jq -n --arg source "$LISKOV_PLUMAGE_SOURCE" --arg sha256 "$LISKOV_PLUMAGE_SHA256" --argjson bytes "$LISKOV_PLUMAGE_BYTES" --argjson connector "$connector" \
             --argjson urls "$(printf '%s\n' "${urls[@]}" | jq -R . | jq -s .)" \
             --argjson digests "$(printf '%s\n' "${digests[@]}" | jq -R . | jq -s .)" \
             --argjson sizes "$(printf '%s\n' "${sizes[@]}" | jq -R 'tonumber' | jq -s .)" \
@@ -221,14 +221,14 @@ jobs:
           {
             echo '## Plumage payload'
             echo
-            echo "Archive \`${SHA256}\` (${BYTES} bytes) pinned as ${#parts[@]} part(s). Download \`payload-identity.json\` from this run's artifact and bind it with:"
+            echo "Archive \`${LISKOV_PLUMAGE_SHA256}\` (${LISKOV_PLUMAGE_BYTES} bytes) pinned as ${#parts[@]} part(s). Download \`payload-identity.json\` from this run's artifact and bind it with:"
             echo
             echo '```sh'
             echo "python3 scripts/fill-v5-release.py --payload-identity payload-identity.json --artifact-digest sha256:<runtime image bootstrap digest>"
             echo '```'
-            if [ "$CLOUDFLARED" = "true" ]; then
+            if [ "$LISKOV_PLUMAGE_CLOUDFLARED" = "true" ]; then
               echo
-              echo "This payload starts cloudflared ${CLOUDFLARED_VERSION}. It refuses to start unless the policy delivers \`LISKOV_PLUMAGE_CLOUDFLARED_TOKEN\` as a secret."
+              echo "This payload starts cloudflared ${LISKOV_PLUMAGE_CLOUDFLARED_VERSION}. It refuses to start unless the policy delivers \`LISKOV_PLUMAGE_CLOUDFLARED_TOKEN\` as a secret."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Retain the payload and its identity

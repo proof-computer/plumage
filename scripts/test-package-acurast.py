@@ -180,9 +180,19 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn('--with-embeddings', workflow)
         self.assertNotIn('secrets.', workflow)
         self.assertNotIn('peer-id:', workflow)
+        self.assertIn('LISKOV_PLUMAGE_CLOUDFLARED_VERSION:', workflow)
+        self.assertNotIn('\n  CLOUDFLARED_VERSION:', workflow)
+        image = (Path(__file__).resolve().parents[1] / '.github/workflows/plumage-runtime-image.yml').read_text()
+        self.assertIn('LISKOV_PLUMAGE_ARTIFACT_DIGEST:', image)
+        self.assertNotIn('\n      ARTIFACT_DIGEST:', image)
         setup = workflow.split('          connector=()\n', 1)[1].split('          python3 scripts/package-acurast.py', 1)[0]
         for enabled in (False, True):
-            env = dict(os.environ, CLOUDFLARED=str(enabled).lower(), CLOUDFLARED_SHA256='abc', CLOUDFLARED_PROTOCOL='http2')
+            env = dict(
+                os.environ,
+                LISKOV_PLUMAGE_CLOUDFLARED=str(enabled).lower(),
+                LISKOV_PLUMAGE_CLOUDFLARED_SHA256='abc',
+                LISKOV_PLUMAGE_CLOUDFLARED_PROTOCOL='http2',
+            )
             flag = subprocess.check_output(
                 ['bash', '-eu', '-c', 'connector=()\n' + setup + '\nprintf "%s\\n" "${connector[*]}"'],
                 env=env, text=True)
