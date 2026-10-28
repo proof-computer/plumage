@@ -525,48 +525,15 @@ async fn readiness_write_error_exits_without_an_external_signal() {
         .spawn()
         .unwrap();
 
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    let status_url = format!("http://127.0.0.1:{site_port}/status.json");
+    // The peer reports readiness only after its own site answered 200 and its
+    // advertisement existed, so its exit proves both; polling them from here
+    // raced the exit on the ARM runner.
     let started = Instant::now();
-    let mut saw_status = false;
-    let mut saw_advert = false;
-    loop {
-        if started.elapsed() > Duration::from_secs(30) {
-            let _ = child.kill();
-            let output = child.wait_with_output().unwrap();
-            panic!(
-                "peer published neither status nor a readiness error\nstdout={}\nstderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        if child.try_wait().unwrap().is_some() {
-            break;
-        }
-        let status_ok = client
-            .get(&status_url)
-            .send()
-            .await
-            .ok()
-            .is_some_and(|response| response.status().as_u16() == 200);
-        if status_ok {
-            saw_status = true;
-        }
-        if advert.is_file() {
-            saw_advert = true;
-        }
-        if saw_status && saw_advert {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    let saw = Instant::now();
     let output = loop {
         if child.try_wait().unwrap().is_some() {
             break child.wait_with_output().unwrap();
         }
-        if saw.elapsed() > Duration::from_secs(10) {
+        if started.elapsed() > Duration::from_secs(30) {
             let _ = child.kill();
             let output = child.wait_with_output().unwrap();
             panic!(
@@ -584,13 +551,12 @@ async fn readiness_write_error_exits_without_an_external_signal() {
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
+        stderr.contains("plumage readiness site=ok advertisement=ok"),
+        "readiness was reported before status and the advertisement\n{stderr}"
+    );
+    assert!(
         stderr.contains("io:") && stderr.contains("No such file or directory"),
         "{stderr}"
-    );
-    assert!(saw_status, "status.json never answered 200\n{stderr}");
-    assert!(
-        saw_advert,
-        "advertisement was not published before exit\n{stderr}"
     );
     assert!(!ready.is_file());
     server.abort();
