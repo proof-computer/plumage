@@ -9,7 +9,7 @@ use crate::tally::{
     fetches, trails, vote_changes,
 };
 
-use super::layout::{card, chip, document, peer, push_escaped};
+use super::layout::{card, chip, document, push_escaped};
 use super::{DayPage, Section};
 
 const HERO_TAIL: &str = " each a small model on its own machine. None is given a personality. \
@@ -34,9 +34,11 @@ struct Peer {
 /// The flock, at `page.chrome.as_of_ms`. Depth 0, section [`Section::Flock`].
 pub fn render_flock(page: &DayPage<'_>) -> String {
     let rows = peer_rows(page);
-    let mut body = String::from("<h1>The flock</h1>\n<p>");
+    let mut body = String::from(
+        "<section class=\"hero\"><div class=\"hero-text\"><h1>The flock</h1>\n<p class=\"lede\">",
+    );
     body.push_str(&hero(rows.len()));
-    body.push_str("</p>\n");
+    body.push_str("</p></div></section>\n");
     body.push_str(&card(
         &format!(
             "Grouped by current vote · {} UTC",
@@ -54,7 +56,7 @@ pub fn render_flock(page: &DayPage<'_>) -> String {
 fn hero(count: usize) -> String {
     match count {
         0 => "No peer has written anything today.".to_owned(),
-        1 => format!("One peer,{HERO_TAIL}"),
+        1 => "One peer, a small model on its own machine, given no personality.".to_owned(),
         n => format!("{n} peers,{HERO_TAIL}"),
     }
 }
@@ -137,7 +139,7 @@ fn peer_rows(page: &DayPage<'_>) -> Vec<Peer> {
 fn groups(page: &DayPage<'_>) -> String {
     let mut body = String::new();
     push_columns(&mut body, page);
-    body.push_str("<p>");
+    body.push_str("<p class=\"muted\" style=\"font-size:14px\">");
     body.push_str(GROUP_NOTE);
     body.push_str("</p>\n");
     // Fixed rule text has no markup. Inserting it raw keeps the constant on
@@ -172,13 +174,13 @@ fn push_columns(out: &mut String, page: &DayPage<'_>) {
         let ink = contrasting_text(rgb);
         let [red, green, blue] = rgb;
         out.push_str(&format!(
-            "<div style=\"flex-grow:{count}\">\n<div style=\"background:#{red:02X}{green:02X}{blue:02X};color:{ink}\">"
+            "<div style=\"flex:{count} 1 150px;min-width:0;border-radius:18px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(0,0,0,0.1);display:flex;flex-direction:column\">\n<div style=\"background:#{red:02X}{green:02X}{blue:02X};color:{ink};padding:16px 18px;display:flex;justify-content:space-between;align-items:baseline;gap:8px\">"
         ));
-        out.push_str("<span>");
+        out.push_str("<span style=\"font-weight:800;font-size:24px;letter-spacing:-0.02em\">");
         push_escaped(out, colour.name());
-        out.push_str("</span><span>");
+        out.push_str("</span><span style=\"font-weight:800;font-size:34px;line-height:1\">");
         out.push_str(&count.to_string());
-        out.push_str("</span></div>\n<ul>\n");
+        out.push_str("</span></div>\n<ul style=\"list-style:none;margin:0;padding:12px 18px 16px;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:15px;font-weight:600\">\n");
         for (name, _) in &members {
             out.push_str("<li>");
             push_escaped(out, name);
@@ -190,38 +192,57 @@ fn push_columns(out: &mut String, page: &DayPage<'_>) {
 }
 
 fn push_table(out: &mut String, page: &DayPage<'_>, rows: &[Peer]) {
-    out.push_str("<div style=\"overflow-x:auto\">\n<table>\n<thead>\n<tr>");
-    for label in [
+    out.push_str(
+        "<div style=\"overflow-x:auto\">\n<table style=\"min-width:760px\">\n<thead>\n<tr>",
+    );
+    for (index, label) in [
         "PEER",
         "VOTES TODAY, OLDEST FIRST",
         "CHANGES",
         "FETCHES",
         "ARGUMENTS",
         "LAST ACTIVE",
-    ] {
-        out.push_str("<th scope=\"col\">");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        out.push_str(if index >= 2 {
+            "<th scope=\"col\" class=\"num\">"
+        } else {
+            "<th scope=\"col\">"
+        });
         out.push_str(label);
         out.push_str("</th>");
     }
     out.push_str("</tr>\n</thead>\n<tbody>\n");
     for row in rows {
         out.push_str("<tr>\n<td>");
-        out.push_str(&peer(&page.chrome, &row.id));
+        out.push_str("<a href=\"flock.html\" style=\"text-decoration:none;display:flex;flex-direction:column;line-height:1.25\">");
+        if let Some(name) = page.chrome.names.get(&row.id) {
+            out.push_str("<span style=\"font-weight:700\">");
+            push_escaped(out, name);
+            out.push_str("</span>");
+        }
+        out.push_str("<span class=\"mono muted\" style=\"font-size:12px\">");
+        push_escaped(out, &row.id);
+        out.push_str("</span></a>");
         out.push_str("</td>\n<td>");
         if row.trail.is_empty() {
             out.push_str("no vote yet");
         } else {
+            out.push_str("<span class=\"chips\" style=\"gap:4px\">");
             for colour in &row.trail {
                 out.push_str(&chip(*colour));
             }
+            out.push_str("</span>");
         }
-        out.push_str("</td>\n<td>");
+        out.push_str("</td>\n<td class=\"num\">");
         out.push_str(&row.changes.to_string());
-        out.push_str("</td>\n<td>");
+        out.push_str("</td>\n<td class=\"num\">");
         out.push_str(&row.fetches.to_string());
-        out.push_str("</td>\n<td>");
+        out.push_str("</td>\n<td class=\"num\">");
         out.push_str(&row.arguments.to_string());
-        out.push_str("</td>\n<td>");
+        out.push_str("</td>\n<td class=\"num\">");
         out.push_str(&hhmm(row.last_ms));
         out.push_str("</td>\n</tr>\n");
     }
@@ -322,7 +343,7 @@ mod tests {
         assert!(html.contains("<h1>The flock</h1>"));
         assert!(html.contains("No peer has written anything today."));
         assert!(html.contains("Grouped by current vote · 00:00 UTC"));
-        assert!(!html.contains("flex-grow:"));
+        assert!(!html.contains("flex:1 1 150px"));
         assert!(html.contains("href=\"flock.html\" aria-current=\"page\""));
         assert!(!html.contains("<li><a"));
         assert!(!html.contains("<td><a"));
@@ -337,19 +358,24 @@ mod tests {
         let votes = [support::vote("peer-a", Red, 0)];
         let shown = page_named(&votes, &[], &[], None, Paint::NoRecord, "peer-a", &labels);
         let html = render_flock(&shown);
-        assert!(html.contains(&format!("One peer,{}", super::HERO_TAIL)));
+        assert!(html.contains(
+            "<section class=\"hero\"><div class=\"hero-text\"><h1>The flock</h1>\n<p class=\"lede\">One peer, a small model on its own machine, given no personality.</p></div></section>"
+        ));
+        assert!(!html.contains("One peer, each"));
         assert!(!html.contains("1 peers"));
         assert!(html.contains("<li>&lt;Wren&amp;&gt;</li>"));
-        assert!(html.contains("&lt;Wren&amp;&gt; <code>peer-a</code>"));
+        assert!(html.contains(
+            "<span style=\"font-weight:700\">&lt;Wren&amp;&gt;</span><span class=\"mono muted\" style=\"font-size:12px\">peer-a</span></a>"
+        ));
         assert!(!html.contains("<Wren&>"));
-        assert!(html.contains("flex-grow:1\""));
+        assert!(html.contains("flex:1 1 150px;"));
         assert!(html.contains("background:#FF0000;color:#000000"));
         assert_rules(&html);
         assert_clean(&html);
     }
 
     #[test]
-    fn twelve_peers_group_by_count_then_colour_with_flex_grow() {
+    fn twelve_peers_group_by_count_then_colour_in_padded_tiles() {
         let roster = [
             ("r7", "Avocet", Red),
             ("r6", "Bunting", Red),
@@ -373,11 +399,14 @@ mod tests {
         let html = render_flock(&shown);
         assert!(html.contains(&format!("12 peers,{}", super::HERO_TAIL)));
 
-        let red_at = html.find("flex-grow:7\"").expect("red column");
-        let blue_at = html.find("flex-grow:3\"").expect("blue column");
-        let green_at = html[blue_at..].find("flex-grow:1\"").expect("green column") + blue_at;
+        let red_at = html.find("flex:7 1 150px;").expect("red column");
+        let blue_at = html.find("flex:3 1 150px;").expect("blue column");
+        let green_at = html[blue_at..]
+            .find("flex:1 1 150px;")
+            .expect("green column")
+            + blue_at;
         let navy_at = html[green_at + 1..]
-            .find("flex-grow:1\"")
+            .find("flex:1 1 150px;")
             .expect("navy column")
             + green_at
             + 1;
@@ -389,6 +418,24 @@ mod tests {
         let blue = &html[blue_at..green_at];
         let green = &html[green_at..navy_at];
         let navy = &html[navy_at..groups_end];
+        for (tile, name, count) in [
+            (red, "red", 7),
+            (blue, "blue", 3),
+            (green, "green", 1),
+            (navy, "navy", 1),
+        ] {
+            assert!(tile.contains("min-width:0;border-radius:18px;overflow:hidden"));
+            assert!(tile.contains("padding:16px 18px;display:flex;justify-content:space-between"));
+            assert!(tile.contains(&format!(
+                "<span style=\"font-weight:800;font-size:24px;letter-spacing:-0.02em\">{name}</span><span style=\"font-weight:800;font-size:34px;line-height:1\">{count}</span>"
+            )));
+            assert!(tile.contains("<ul style=\"list-style:none;margin:0;padding:12px 18px 16px;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:15px;font-weight:600\">"));
+        }
+        assert_eq!(html.matches("flex:1 1 150px;").count(), 2);
+        assert!(html.contains(&format!(
+            "<p class=\"muted\" style=\"font-size:14px\">{}</p>",
+            super::GROUP_NOTE
+        )));
         assert!(red.contains("background:#FF0000;color:#000000"));
         assert!(blue.contains("background:#0000FF;color:#FFFFFF"));
         assert!(green.contains("background:#008000;color:#FFFFFF"));
@@ -412,10 +459,10 @@ mod tests {
         assert_eq!(html.matches(&chip(Blue)).count(), 3);
         assert_eq!(html.matches(&chip(Green)).count(), 1);
         assert_eq!(html.matches(&chip(Navy)).count(), 1);
-        assert!(html.contains("Avocet <code>r7</code>"));
+        assert!(html.contains(&named_peer("Avocet", "r7")));
         assert!(
-            html.find("Avocet <code>r7</code>").unwrap()
-                < html.find("Goose <code>r1</code>").unwrap()
+            html.find(&named_peer("Avocet", "r7")).unwrap()
+                < html.find(&named_peer("Goose", "r1")).unwrap()
         );
         assert_rules(&html);
         assert_clean(&html);
@@ -459,42 +506,57 @@ mod tests {
             },
         };
         let html = render_flock(&page);
+        assert!(html.contains("<table style=\"min-width:760px\">"));
+        for label in ["CHANGES", "FETCHES", "ARGUMENTS", "LAST ACTIVE"] {
+            assert!(html.contains(&format!("<th scope=\"col\" class=\"num\">{label}</th>")));
+        }
+        assert_eq!(html.matches("<th scope=\"col\" class=\"num\">").count(), 4);
+        assert_eq!(html.matches("<td class=\"num\">").count(), 12);
         assert!(html.contains("Grouped by current vote · 00:50 UTC"));
         let groups = html.split("Every peer today").next().unwrap();
-        assert!(groups.contains("flex-grow:1\""));
+        assert!(groups.contains("flex:1 1 150px;"));
         assert!(groups.contains("background:#0000FF;color:#FFFFFF"));
         assert!(groups.contains("<li>Avocet</li>"));
         assert!(!groups.contains("Bittern"));
         assert!(!groups.contains("Wren"));
 
-        let avocet = row_after(&html, "Avocet <code>peer-b</code>");
-        let chips = format!("{}{}{}", chip(Blue), chip(Red), chip(Blue));
+        let avocet = row_after(&html, &named_peer("Avocet", "peer-b"));
+        let chips = format!(
+            "<span class=\"chips\" style=\"gap:4px\">{}{}{}</span>",
+            chip(Blue),
+            chip(Red),
+            chip(Blue)
+        );
         let chips_at = avocet.find(&chips).expect("blue red blue chips");
-        let changes_at = avocet.find("<td>2</td>").expect("two changes");
-        let fetches_at = avocet.find("<td>1</td>").expect("one fetch");
+        let changes_at = avocet
+            .find("<td class=\"num\">2</td>")
+            .expect("two changes");
+        let fetches_at = avocet.find("<td class=\"num\">1</td>").expect("one fetch");
         let arguments_at = avocet[changes_at + 1..]
-            .find("<td>2</td>")
+            .find("<td class=\"num\">2</td>")
             .expect("two arguments")
             + changes_at
             + 1;
-        let last_at = avocet.find("<td>00:45</td>").expect("last active");
+        let last_at = avocet
+            .find("<td class=\"num\">00:45</td>")
+            .expect("last active");
         assert!(chips_at < changes_at && changes_at < fetches_at && fetches_at < arguments_at);
         assert!(arguments_at < last_at);
 
-        let bittern = row_after(&html, "Bittern <code>peer-c</code>");
+        let bittern = row_after(&html, &named_peer("Bittern", "peer-c"));
         assert!(bittern.contains("no vote yet"));
-        assert!(bittern.contains("<td>0</td>"));
-        assert!(bittern.contains("<td>1</td>"));
-        assert!(bittern.contains("<td>00:25</td>"));
+        assert!(bittern.contains("<td class=\"num\">0</td>"));
+        assert!(bittern.contains("<td class=\"num\">1</td>"));
+        assert!(bittern.contains("<td class=\"num\">00:25</td>"));
 
-        let wren = row_after(&html, "Wren <code>peer-a</code>");
+        let wren = row_after(&html, &named_peer("Wren", "peer-a"));
         assert!(wren.contains("no vote yet"));
-        assert!(wren.contains("<td>2</td>"));
-        assert!(wren.contains("<td>00:50</td>"));
+        assert!(wren.contains("<td class=\"num\">2</td>"));
+        assert!(wren.contains("<td class=\"num\">00:50</td>"));
 
-        let avocet_at = html.find("Avocet <code>peer-b</code>").unwrap();
-        let bittern_at = html.find("Bittern <code>peer-c</code>").unwrap();
-        let wren_at = html.find("Wren <code>peer-a</code>").unwrap();
+        let avocet_at = html.find(&named_peer("Avocet", "peer-b")).unwrap();
+        let bittern_at = html.find(&named_peer("Bittern", "peer-c")).unwrap();
+        let wren_at = html.find(&named_peer("Wren", "peer-a")).unwrap();
         assert!(avocet_at < bittern_at && bittern_at < wren_at);
 
         assert!(html.contains(&format!(
@@ -507,7 +569,27 @@ mod tests {
         assert_rules(&html);
         assert_marked_clean(&html);
         assert!(!html.contains("<li><a"));
-        assert!(!html.contains("<td><a"));
+        assert_eq!(html.matches("<td><a href=\"flock.html\"").count(), 3);
+    }
+
+    #[test]
+    fn unknown_peer_shows_only_its_escaped_id() {
+        let votes = [support::vote("<peer&>", Blue, 0)];
+        let html = render_flock(&page(&votes, &[], &[], None, Paint::NoRecord));
+        let table = html.split_once("<table ").unwrap().1;
+        assert!(table.contains(
+            "<td><a href=\"flock.html\" style=\"text-decoration:none;display:flex;flex-direction:column;line-height:1.25\"><span class=\"mono muted\" style=\"font-size:12px\">&lt;peer&amp;&gt;</span></a></td>"
+        ));
+        assert!(!table.contains("font-weight:700"));
+        assert!(!html.contains("<peer&>"));
+        assert_rules(&html);
+        assert_clean(&html);
+    }
+
+    fn named_peer(name: &str, id: &str) -> String {
+        format!(
+            "<span style=\"font-weight:700\">{name}</span><span class=\"mono muted\" style=\"font-size:12px\">{id}</span>"
+        )
     }
 
     fn row_after<'a>(html: &'a str, marker: &str) -> &'a str {
