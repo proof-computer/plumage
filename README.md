@@ -159,9 +159,8 @@ file `Qwen3.5-4B-Q4_K_M.gguf` at revision
 Apache-2.0, pinned on 2026-10-28. The workflow pins the archive in parts
 and writes `payload-identity.json` (`plumage.payload-identity.v1`).
 
-`.liskov/plumage.v5.json` is the unpublished two-job draft. Its artifact
-digest is all zeroes and its five payload variables are empty. Bind a build
-with:
+`.liskov/plumage.v5.json` is the two-job policy. It names one build by its
+artifact digest and five payload variables. Bind a new build with:
 
 ```sh
 python3 scripts/fill-v5-release.py \
@@ -171,8 +170,7 @@ python3 scripts/fill-v5-release.py \
 
 The script refuses a result that still has the all-zero digest or an empty
 payload variable. Creating the secrets, the tunnel, the source binding and
-publishing stay with the owner. The spend caps in the draft are Planetarium's
-until that publish.
+publishing stay with the owner. The spend caps are Planetarium's.
 
 ## Development
 
