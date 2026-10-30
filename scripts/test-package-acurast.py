@@ -296,7 +296,7 @@ class BuildDocumentTests(unittest.TestCase):
         names = [item['name'] for item in published['configuration']['variables']]
         self.assertEqual(names, ['LISKOV_PLUMAGE_HOME', *release.VARIABLES])
         for item in published['configuration']['variables'][1:]:
-            self.assertEqual(item['value'], '')
+            self.assertTrue(item['value'], item['name'])
 
     def test_image_workflow_uploads_the_build_document(self):
         workflow = (self.root / '.github' / 'workflows' / 'plumage-runtime-image.yml').read_text()
