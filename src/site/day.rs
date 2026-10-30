@@ -12,7 +12,7 @@ use crate::tally::{
 };
 
 use super::layout::{chip, document, peer, push_escaped};
-use super::{DayPage, Section};
+use super::{DayPage, Paint, Section};
 
 const NOT_YET: &str = "repeating-linear-gradient(45deg,#F3F2EE 0 6px,#FFFFFF 6px 12px)";
 const HATCH: &str = "repeating-linear-gradient(45deg,#E4E3DE 0 6px,#F3F2EE 6px 12px)";
@@ -86,25 +86,41 @@ fn decision_copy(page: &DayPage<'_>, live: usize) -> (String, String, String) {
 
 fn push_nav(out: &mut String, page: &DayPage<'_>) {
     let today = Day::from_ms(page.chrome.as_of_ms);
-    let previous = page.day.previous();
-    out.push_str("<nav aria-label=\"Days\"><a href=\"");
-    out.push_str(&previous.to_string());
-    out.push_str(".html\">← ");
-    out.push_str(&previous.to_string());
-    out.push_str("</a>");
-    if page.day != today {
-        let next = page.day.next();
-        if next == today {
-            out.push_str("<a href=\"../index.html\">Today →</a>");
+    let next = page.next.filter(|_| page.day != today);
+    if page.previous.is_none() && next.is_none() {
+        return;
+    }
+    out.push_str("<nav aria-label=\"Days\">");
+    if let Some((day, paint)) = page.previous {
+        out.push_str(&format!(
+            "<a href=\"{day}.html\">← {} · {}</a>",
+            prose_date(day),
+            outcome(paint)
+        ));
+    }
+    if let Some((day, paint)) = next {
+        if day == today {
+            out.push_str(&format!(
+                "<a href=\"../index.html\">{} · open now →</a>",
+                prose_date(day)
+            ));
         } else {
-            out.push_str("<a href=\"");
-            out.push_str(&next.to_string());
-            out.push_str(".html\">");
-            out.push_str(&next.to_string());
-            out.push_str(" →</a>");
+            out.push_str(&format!(
+                "<a href=\"{day}.html\">{} · {} →</a>",
+                prose_date(day),
+                outcome(paint)
+            ));
         }
     }
     out.push_str("</nav>\n");
+}
+
+fn outcome(paint: Paint) -> &'static str {
+    match paint {
+        Paint::Decided(colour) => colour.name(),
+        Paint::Undecided => "undecided",
+        Paint::NoRecord => "no record",
+    }
 }
 
 fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
@@ -720,8 +736,55 @@ mod tests {
         assert!(html.contains("OPEN UNTIL 23:00 UTC"));
         assert!(!html.contains("Today →"));
         assert!(!html.contains("1970-01-02.html"));
-        assert!(html.contains("href=\"1969-12-31.html\""));
+        assert!(!html.contains("<nav aria-label=\"Days\">"));
         assert_clean(&html);
+    }
+
+    #[test]
+    fn navigation_uses_only_supplied_neighbours_and_their_outcomes() {
+        let day: Day = "2026-10-25".parse().unwrap();
+        let previous: Day = "2026-10-24".parse().unwrap();
+        let next: Day = "2026-10-26".parse().unwrap();
+        let mut shown = page(&[], &[], &[], Some(Decision::Undecided), Paint::Undecided);
+        shown.day = day;
+        shown.chrome.as_of_ms = next.open_ms();
+        shown.previous = Some((previous, Paint::Undecided));
+        shown.next = Some((next, Paint::NoRecord));
+        let html = render_day(&shown);
+        assert!(html.contains("<a href=\"2026-10-24.html\">← Saturday 24 October · undecided</a>"));
+        assert!(html.contains("<a href=\"../index.html\">Monday 26 October · open now →</a>"));
+
+        shown.previous = None;
+        let html = render_day(&shown);
+        assert!(!html.contains('←'));
+        assert!(html.contains("Monday 26 October · open now →"));
+        shown.next = None;
+        assert!(!render_day(&shown).contains("<nav aria-label=\"Days\">"));
+
+        // Recorded neighbours need not be consecutive calendar days.
+        shown.chrome.as_of_ms = next.next().open_ms();
+        for (paint, label) in [
+            (Paint::Decided(Blue), "blue"),
+            (Paint::Undecided, "undecided"),
+            (Paint::NoRecord, "no record"),
+        ] {
+            shown.previous = Some((previous.previous(), paint));
+            shown.next = Some((next, paint));
+            let html = render_day(&shown);
+            assert!(html.contains(&format!(
+                "<a href=\"2026-10-23.html\">← Friday 23 October · {label}</a>"
+            )));
+            assert!(html.contains(&format!(
+                "<a href=\"2026-10-26.html\">Monday 26 October · {label} →</a>"
+            )));
+            assert_markup_clean(&html);
+        }
+
+        // Even a supplied next neighbour cannot put a next link on today.
+        shown.chrome.as_of_ms = day.open_ms();
+        let html = render_day(&shown);
+        assert!(html.contains('←'));
+        assert!(!html.contains(" →</a>"));
     }
 
     #[test]
@@ -743,6 +806,8 @@ mod tests {
         let names = BTreeMap::new();
         let shown = DayPage {
             day,
+            previous: Some((day.previous(), Paint::Undecided)),
+            next: Some((today, Paint::NoRecord)),
             votes: &votes,
             arguments: &[],
             evidence: &[],
@@ -764,7 +829,7 @@ mod tests {
         assert!(html.contains("from 17:10 to 18:10 UTC"));
         assert!(html.contains("It painted Monday 26 October."));
         assert!(html.contains("SUNDAY 25 OCTOBER 2026 · CLOSED 23:00 UTC"));
-        assert!(html.contains("Today →"));
+        assert!(html.contains("Monday 26 October · open now →"));
         assert!(html.contains("href=\"2026-10-24.html\""));
         assert!(!html.contains("href=\"2026-10-26.html\""));
         assert_eq!(html.matches("held 17:10\u{2013}18:10").count(), 1);
@@ -969,6 +1034,8 @@ mod tests {
         let names = BTreeMap::new();
         let shown = DayPage {
             day,
+            previous: None,
+            next: None,
             votes: &votes,
             arguments: &arguments,
             evidence: &[],
@@ -1039,6 +1106,8 @@ mod tests {
         let names = BTreeMap::new();
         let shown = DayPage {
             day: Day::from_ms(0),
+            previous: None,
+            next: None,
             votes: &[],
             arguments: &arguments,
             evidence: &records,

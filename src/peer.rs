@@ -627,8 +627,12 @@ async fn write_live(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
     let frame = frame_from(&index, &config.clock);
     let names = display_names(&config.peer_id, authors(&index));
     let chrome = chrome(&config.peer_id, painted_by, now, now, &names);
+    let archive = read_archive(&config.site_dir).await?;
+    let (previous, next) = neighbours(&archive, day, Day::from_ms(now));
     let page = DayPage {
         day,
+        previous,
+        next,
         votes: &frame.votes,
         arguments: &frame.arguments,
         evidence: &frame.evidence,
@@ -650,7 +654,6 @@ async fn write_live(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
         render_day(&page).as_bytes(),
     )
     .await?;
-    let archive = read_archive(&config.site_dir).await?;
     write_atomic(
         &config.site_dir.join("days/index.html"),
         render_archive(&ArchivePage {
@@ -706,20 +709,23 @@ async fn write_closed_day(config: &PeerConfig, book: &Book, day: Day) -> Result<
     let json_changed = previous.as_deref() != Some(published.as_slice());
     if json_changed {
         write_atomic(&path, &published).await?;
+        let archive = read_archive(&config.site_dir).await?;
+        let (previous, next) = neighbours(&archive, day, Day::from_ms(now));
         let closed = DayPage {
             day,
+            previous,
+            next,
             votes: &frame.votes,
             arguments: &frame.arguments,
             evidence: &frame.evidence,
             decision: Some(decision),
-            chrome: chrome(&config.peer_id, paint, close, now, &names),
+            chrome: chrome(&config.peer_id, paint, now, now, &names),
         };
         write_atomic(
             &config.site_dir.join(format!("days/{day}.html")),
             render_day(&closed).as_bytes(),
         )
         .await?;
-        let archive = read_archive(&config.site_dir).await?;
         let archive_names = display_names(&config.peer_id, std::iter::empty());
         let archive_chrome = chrome(&config.peer_id, paint, now, now, &archive_names);
         write_atomic(
@@ -752,6 +758,8 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunSt
     let today_names = display_names(&config.peer_id, std::iter::empty());
     let today = DayPage {
         day: next,
+        previous: None,
+        next: None,
         votes: &[],
         arguments: &[],
         evidence: &[],
@@ -1098,6 +1106,23 @@ async fn read_archive(site_dir: &Path) -> Result<Vec<(Day, Paint)>> {
     Ok(days)
 }
 
+type Neighbours = (Option<(Day, Paint)>, Option<(Day, Paint)>);
+
+/// Nearest published closed days, with the open day as the final next page.
+fn neighbours(archive: &[(Day, Paint)], day: Day, today: Day) -> Neighbours {
+    let previous = archive.iter().rev().find(|(date, _)| *date < day).copied();
+    let next = if day < today {
+        archive
+            .iter()
+            .find(|(date, _)| *date > day && *date < today)
+            .copied()
+            .or(Some((today, Paint::NoRecord)))
+    } else {
+        None
+    };
+    (previous, next)
+}
+
 struct RunState {
     activations: Activations,
     started_real_ms: u64,
@@ -1238,6 +1263,40 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[test]
+    fn neighbours_skip_gaps_and_stop_at_the_open_day() {
+        let first: Day = "2026-10-21".parse().unwrap();
+        let middle: Day = "2026-10-24".parse().unwrap();
+        let last: Day = "2026-10-26".parse().unwrap();
+        let today: Day = "2026-10-30".parse().unwrap();
+        let blue = Paint::Decided(Colour::Blue);
+        let archive = [(first, blue), (middle, Paint::Undecided), (last, blue)];
+        assert_eq!(neighbours(&[], today, today), (None, None));
+        assert_eq!(
+            neighbours(&archive, first, today),
+            (None, Some((middle, Paint::Undecided)))
+        );
+        assert_eq!(
+            neighbours(&archive, middle, today),
+            (Some((first, blue)), Some((last, blue)))
+        );
+        assert_eq!(
+            neighbours(&archive, middle.next(), today),
+            (Some((middle, Paint::Undecided)), Some((last, blue)))
+        );
+        assert_eq!(
+            neighbours(&archive, last, today),
+            (
+                Some((middle, Paint::Undecided)),
+                Some((today, Paint::NoRecord))
+            )
+        );
+        assert_eq!(
+            neighbours(&archive, today, today),
+            (Some((last, blue)), None)
+        );
+    }
 
     #[tokio::test]
     async fn archive_reads_missing_days_as_empty_but_preserves_other_errors() {

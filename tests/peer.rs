@@ -206,6 +206,9 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     let archive_path = site.join("days/index.html");
     until("archive on the first live write", || archive_path.is_file()).await;
     assert!(!site.join(format!("days/{DAY}.json")).exists());
+    let first_day = std::fs::read_to_string(site.join(format!("days/{DAY}.html"))).unwrap();
+    assert!(!first_day.contains('←'));
+    assert!(!first_day.contains("<nav aria-label=\"Days\">"));
     let first_archive = std::fs::read_to_string(&archive_path).unwrap();
     assert!(first_archive.contains("<h1>The days</h1>"));
     assert!(first_archive.contains("0 days · 0 decided · 0 undecided"));
@@ -234,6 +237,8 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
 
     let day_html = std::fs::read_to_string(site.join("days/2026-10-26.html")).unwrap();
     assert!(day_html.contains("background:#0000FF"));
+    assert!(!day_html.contains('←'));
+    assert!(day_html.contains("<a href=\"../index.html\">Tuesday 27 October · open now →</a>"));
     let index = std::fs::read_to_string(site.join("index.html")).unwrap();
     assert!(index.contains("27 OCTOBER 2026"));
     assert!(index.contains("background:#0000FF"));
@@ -438,6 +443,18 @@ async fn an_incoming_job_recomputes_yesterday_from_the_sibling_ledger() {
             && follower["previous_day"]["paint"] != "no_record"
     })
     .await;
+    let live_path = root.path().join("p01-site/days/2026-10-27.html");
+    until("open day links the first closed day", || {
+        std::fs::read_to_string(&live_path).is_ok_and(|html| {
+            html.contains("<a href=\"2026-10-26.html\">← Monday 26 October · blue</a>")
+        })
+    })
+    .await;
+    let live_html = std::fs::read_to_string(&live_path).unwrap();
+    assert!(!live_html.contains(" →</a>"));
+    let closed_html =
+        std::fs::read_to_string(root.path().join("p01-site/days/2026-10-26.html")).unwrap();
+    assert!(closed_html.contains("<a href=\"../index.html\">Tuesday 27 October · open now →</a>"));
     let archive = std::fs::read_to_string(root.path().join("p01-site/days/index.html")).unwrap();
     assert!(archive.contains(&format!("href=\"{DAY}.html\"")));
     assert!(!root.path().join("p01-site/days/2026-10-25.json").is_file());

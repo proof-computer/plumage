@@ -64,6 +64,10 @@ pub struct Chrome<'a> {
 #[derive(Debug)]
 pub struct DayPage<'a> {
     pub day: Day,
+    /// Nearest recorded day before this page; absent before the first record.
+    pub previous: Option<(Day, Paint)>,
+    /// Nearest later record, or the open day with `Paint::NoRecord`.
+    pub next: Option<(Day, Paint)>,
     pub votes: &'a [Vote],
     pub arguments: &'a [ArgumentView],
     pub evidence: &'a [Evidence],
@@ -192,6 +196,8 @@ mod support {
     ) -> DayPage<'a> {
         DayPage {
             day: Day::from_ms(0),
+            previous: None,
+            next: None,
             votes,
             arguments,
             evidence,

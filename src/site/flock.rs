@@ -493,6 +493,8 @@ mod tests {
         let as_of_ms = 50 * MINUTE_MS;
         let page = DayPage {
             day: Day::from_ms(as_of_ms),
+            previous: None,
+            next: None,
             votes: &votes,
             arguments: &arguments,
             evidence: &evidence,
