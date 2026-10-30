@@ -622,6 +622,8 @@ async fn serve_is_read_only_and_refuses_escape() {
     std::fs::write(root.path().join("status.json"), b"{\"ok\":true}").unwrap();
     std::fs::write(root.path().join("note.txt"), b"note").unwrap();
     std::fs::create_dir(root.path().join("days")).unwrap();
+    std::fs::write(root.path().join("days/index.html"), b"<h1>The days</h1>").unwrap();
+    std::fs::create_dir(root.path().join("nothing")).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (stop, mut stop_rx) = watch::channel(false);
@@ -645,6 +647,10 @@ async fn serve_is_read_only_and_refuses_escape() {
     let front = client.get(format!("{base}/")).send().await.unwrap();
     assert_eq!(front.status(), 200);
     assert_eq!(front.text().await.unwrap(), "<p>front</p>");
+    let days = client.get(format!("{base}/days/")).send().await.unwrap();
+    assert_eq!(days.status(), 200);
+    assert_eq!(days.headers().get("cache-control").unwrap(), "no-store");
+    assert_eq!(days.text().await.unwrap(), "<h1>The days</h1>");
     let status = client
         .get(format!("{base}/status.json"))
         .send()
@@ -664,7 +670,13 @@ async fn serve_is_read_only_and_refuses_escape() {
         .await
         .unwrap();
     assert_eq!(post.status(), 405);
-    for path in ["/../Cargo.toml", "/%2e%2e/x", "/days/", "/missing.txt"] {
+    for path in [
+        "/../Cargo.toml",
+        "/%2e%2e/x",
+        "/days",
+        "/nothing/",
+        "/missing.txt",
+    ] {
         let response = client.get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(response.status(), 404, "{path}");
     }

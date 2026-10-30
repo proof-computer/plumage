@@ -201,12 +201,26 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     let (sender, receiver) = watch::channel(false);
     let config = peer_config(root.path(), "p00", &model, Vec::new(), shared);
     let started = wall_now();
-    start(config, receiver).await.unwrap();
+    let run = tokio::spawn(async move { start(config, receiver).await });
+    let site = root.path().join("p00-site");
+    let archive_path = site.join("days/index.html");
+    until("archive on the first live write", || archive_path.is_file()).await;
+    assert!(!site.join(format!("days/{DAY}.json")).exists());
+    let first_archive = std::fs::read_to_string(&archive_path).unwrap();
+    assert!(first_archive.contains("<h1>The days</h1>"));
+    assert!(first_archive.contains("0 days · 0 decided · 0 undecided"));
+    let first_freshness = first_archive.split_once("Records as of ").unwrap().1;
+    until("archive freshness after another activation", || {
+        let archive = std::fs::read_to_string(&archive_path).unwrap();
+        archive.split_once("Records as of ").unwrap().1 != first_freshness
+    })
+    .await;
+    assert!(!site.join(format!("days/{DAY}.json")).exists());
+    run.await.unwrap().unwrap();
     let ended = wall_now();
     drop(sender);
     server.abort();
 
-    let site = root.path().join("p00-site");
     let document: Value =
         serde_json::from_slice(&std::fs::read(site.join("days/2026-10-26.json")).unwrap()).unwrap();
     assert_eq!(document["day"], DAY);
