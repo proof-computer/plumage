@@ -650,6 +650,16 @@ async fn write_live(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
         render_day(&page).as_bytes(),
     )
     .await?;
+    let archive = read_archive(&config.site_dir).await?;
+    write_atomic(
+        &config.site_dir.join("days/index.html"),
+        render_archive(&ArchivePage {
+            days: &archive,
+            chrome,
+        })
+        .as_bytes(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1062,7 +1072,11 @@ fn paint_from_decision(decision: &Value) -> Result<Paint> {
 
 async fn read_archive(site_dir: &Path) -> Result<Vec<(Day, Paint)>> {
     let directory = site_dir.join("days");
-    let mut read = tokio::fs::read_dir(&directory).await.map_err(storage)?;
+    let mut read = match tokio::fs::read_dir(&directory).await {
+        Ok(read) => read,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(storage(error)),
+    };
     let mut days = Vec::new();
     while let Some(entry) = read.next_entry().await.map_err(storage)? {
         let path = entry.path();
@@ -1224,6 +1238,15 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[tokio::test]
+    async fn archive_reads_missing_days_as_empty_but_preserves_other_errors() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_archive(root.path()).await.unwrap().is_empty());
+
+        std::fs::write(root.path().join("days"), b"not a directory").unwrap();
+        assert_eq!(read_archive(root.path()).await.unwrap_err().code, "storage");
+    }
 
     #[tokio::test]
     async fn a_reply_then_a_vote_change_is_counted_in_status() {

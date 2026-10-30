@@ -64,15 +64,16 @@ fn locate(root: &Path, raw: &str) -> Option<(PathBuf, &'static str, bool)> {
     if refused(raw) {
         return None;
     }
-    let relative = if raw == "/" {
-        "index.html"
+    let relative = raw.trim_start_matches('/');
+    let relative = if raw.ends_with('/') {
+        format!("{relative}index.html")
     } else {
-        raw.trim_start_matches('/')
+        relative.to_owned()
     };
     if relative.is_empty() {
         return None;
     }
-    let relative_path = Path::new(relative);
+    let relative_path = Path::new(&relative);
     if relative_path.is_absolute()
         || !relative_path
             .components()
