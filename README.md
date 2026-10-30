@@ -116,7 +116,7 @@ file exists, the peer writes the readiness file. `SIGINT` or `SIGTERM` stops
 the peer, the connector and the server, and exits 0.
 
 The published `peer.json` names `listen` `[::]:8841`, `model_url`
-`http://127.0.0.1:8081/`, `data_dir` `state/data`, `site_dir` `state/site`,
+`http://127.0.0.1:8081/`, `inference_timeout_seconds` 1200, `data_dir` `state/data`, `site_dir` `state/site`,
 a real-time clock and `liskov.site_listen` `127.0.0.1:8840`. The harness
 descriptor `deployment.json` points `peer_config` at that file and reserves
 ports 8840 and 8841. Packaging that descriptor is the release path below.
