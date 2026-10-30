@@ -28,7 +28,7 @@ pub fn render_day(page: &DayPage<'_>) -> String {
     push_nav(&mut body, page);
     body.push_str("<section class=\"hero\"><div class=\"hero-text\"><p class=\"mono eyebrow\">");
     push_escaped(&mut body, &status_line(page.day, open));
-    body.push_str("</p>\n<h1 style=\"font-size:132px;line-height:0.9;letter-spacing:-0.045em\">");
+    body.push_str("</p>\n<h1 class=\"verdict\">");
     push_escaped(&mut body, &headline);
     body.push_str("</h1>\n<p class=\"lede\">");
     push_escaped(&mut body, &prose);
@@ -696,6 +696,8 @@ mod tests {
         assert!(html.contains("<body style=\"background:#0000FF;color:#FFFFFF\">"));
         assert!(html.contains("background:#0000FF"));
         assert!(html.contains("Blue."));
+        assert!(html.contains("<h1 class=\"verdict\">Blue.</h1>"));
+        assert!(!html.contains("font-size:132px"));
         assert!(html.contains("from 00:00 to 01:00 UTC"));
         assert!(html.contains("It painted Friday 2 January."));
         assert!(html.contains(RULE));
@@ -720,6 +722,8 @@ mod tests {
         let shown = page(&[], &[], &[], Some(Decision::Undecided), Paint::Undecided);
         let html = render_day(&shown);
         assert!(html.contains("Undecided."));
+        assert!(html.contains("<h1 class=\"verdict\">Undecided.</h1>"));
+        assert!(!html.contains("font-size:132px"));
         assert!(html.contains("Friday 2 January was left unpainted."));
         assert!(html.contains("The rule that decided it"));
         assert_eq!(body_open(&html), "<body>");
@@ -731,6 +735,8 @@ mod tests {
         let shown = page(&[], &[], &[], None, Paint::NoRecord);
         let html = render_day(&shown);
         assert!(html.contains("Open."));
+        assert!(html.contains("<h1 class=\"verdict\">Open.</h1>"));
+        assert!(!html.contains("font-size:132px"));
         assert!(html.contains("The question is open until 23:00 UTC."));
         assert!(html.contains("The rule that will decide it"));
         assert!(html.contains("OPEN UNTIL 23:00 UTC"));
