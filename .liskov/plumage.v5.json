@@ -113,27 +113,27 @@
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_URL",
         "source": "literal",
-        "value": "https://gateway.pinata.cloud/ipfs/QmQXb6WTded62fMxjZAgeTj2mYZaSh6PKKRNxNdLpaQwJe https://gateway.pinata.cloud/ipfs/Qmf9fvrbk4WBqTVnQWwrq3YhkpdcULbKoUAvma3qUKrwHY https://gateway.pinata.cloud/ipfs/Qmb6oqtdzpTT51SJFEfzu1XPpUieTVeEJL1d8zJ7o66c26 https://gateway.pinata.cloud/ipfs/QmbbWNYginjynPa1MPtm92rMXutToDFU3Aqjck2AAVk35Z https://gateway.pinata.cloud/ipfs/QmZVnDK4UQBMK1yFufscmCMKSdKTRHocgJSeirbkf31MLQ https://gateway.pinata.cloud/ipfs/QmX7ZoN8Y9eKiVWBsnLz8MLKaynu28wdqcvyevWsEBisBQ https://gateway.pinata.cloud/ipfs/QmWeFJkADP6wiahT1KhBRMUm9aiayYtBDHn9RBherNGHvj https://gateway.pinata.cloud/ipfs/QmbneYyMRA1HNr2Bs5fH8UZfEYzJEpCvKzo6GpKdZzrkdD https://gateway.pinata.cloud/ipfs/QmVp8rKfDs3c3aPDJadWu8Hx1TAPYMF6ByCFnDbfbEh6kK https://gateway.pinata.cloud/ipfs/QmNxMUs1zbydpWHyF5cSjjVojjgJ7egUjYAGoxuKJKgfP9 https://gateway.pinata.cloud/ipfs/QmdPZ1UgzTax5GNm9tAURXEjtFeNCMxUHc7zemprp46x97"
+        "value": "https://gateway.pinata.cloud/ipfs/QmQXb6WTded62fMxjZAgeTj2mYZaSh6PKKRNxNdLpaQwJe https://gateway.pinata.cloud/ipfs/Qmf9fvrbk4WBqTVnQWwrq3YhkpdcULbKoUAvma3qUKrwHY https://gateway.pinata.cloud/ipfs/Qmb6oqtdzpTT51SJFEfzu1XPpUieTVeEJL1d8zJ7o66c26 https://gateway.pinata.cloud/ipfs/QmbbWNYginjynPa1MPtm92rMXutToDFU3Aqjck2AAVk35Z https://gateway.pinata.cloud/ipfs/QmYgvTbDFX5QQepJirs3iYH2AHZZ7gDL7Dx8ztxwBXnZsQ https://gateway.pinata.cloud/ipfs/QmRt1XGbKGeYDSn3NCiGXftZqgQS8uhGX1SZqFJXZGVpvB https://gateway.pinata.cloud/ipfs/QmYuxgxWK566XX6ZKfJLzLbtQXasB8jiWrkzuizUniJC88 https://gateway.pinata.cloud/ipfs/QmRH7QYxAutNRnfaTSmMXUxMnaqkWZpiz4e918FbAnm5qG https://gateway.pinata.cloud/ipfs/QmQ9hqzRN6zff4JXQmVR4Kus5RzwCaVSvreW458GBu3R8F https://gateway.pinata.cloud/ipfs/QmZgsrcFETZMsKxRev6cZW7QDhLuyincPDy9G3dnbRDme3 https://gateway.pinata.cloud/ipfs/QmY4PGkHCd8sZzE46c3HQNdabkwWfJCsfVG2AS8aspDH9p"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_SHA256",
         "source": "literal",
-        "value": "e06659b71db1fa8980311c554531363112ee442999f19abb0772a20747882ad3"
+        "value": "d1735defd142be8be4f50ab2fb189061890d253fcf3b3cc6f8f2ede055ce9375"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_BYTES",
         "source": "literal",
-        "value": "41008682"
+        "value": "41032634"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_PART_SHA256",
         "source": "literal",
-        "value": "5317a1b33884405946024e2ef77c198a19abebe8ed78011829071bd86f587350 359d729e71902630a1ee4be455ed928a457e5c903a302f0b7b0496c2edd3e2e3 45bacd971c8dc69fcad08dbd2d63f6574f3b1f58260917c78011a3f22c3b25ba 3bd1551ae5952316b2896b1b6b9791960e96c855494a0331d06a5a70f5bd720f 8753a09628ddb50e6fd95e92a4a7a1f4502439848c96728d58dfe1d63ad25b6e a20997db36e8a47e3313bb9989fcc6fc0c0aaf3c5b88e0c0178e7088c698826d 30591f486f6614da34f051cd6a27967489e142bfea055fa892ad806ac8f79b31 67f829e626e689e6f0da42adf777d9de7c01350029f81fd8dc382cca15001f74 8754465a51a61177622f2acff0b520b70fe364e9c5a6c805c6ae5597c91624f8 5b53220a057f312461864804b2e350edbce9d2f413ff09dc1999ffd2fb35fbdf 1aefc278f5d6d94b1e49922832651dffb8b5bd6c2e311cb91f83afb3fcaf108d"
+        "value": "5317a1b33884405946024e2ef77c198a19abebe8ed78011829071bd86f587350 359d729e71902630a1ee4be455ed928a457e5c903a302f0b7b0496c2edd3e2e3 45bacd971c8dc69fcad08dbd2d63f6574f3b1f58260917c78011a3f22c3b25ba 3bd1551ae5952316b2896b1b6b9791960e96c855494a0331d06a5a70f5bd720f 074fafd4ebee94169277a82076f784d988d496952c36647a0bda004c89b56f05 7515a422974dd42a70edaafe768f44ceafaedd5a481bfe81d12389dc62532aa8 621cfceccfa65a346fd7ac97c5117b033281e6f3143b87202fea62d8e64a0fba e915ec860d97f30e1217a34aa2426fcf4258b912d599531e0146c5adf5155d0c 4acb11cc601a9ae089dc6a0ce7783a7f3397823618370c1ce0dc38055fbb28da 09ab0773cab3bed7f360c483dd157ecb2d382eca5500f9bd6047362ab2f52cd3 f5ef46bc81ff7d0239f5a206b40e0a1eb69e6246ee0f1606e99a810c79f3e498"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_PART_BYTES",
         "source": "literal",
-        "value": "4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 1008682"
+        "value": "4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 1032634"
       }
     ],
     "secrets": [
