@@ -219,7 +219,7 @@ class ReleaseBindingTests(unittest.TestCase):
     def test_fill_writes_five_variables_and_refuses_the_unfilled_draft(self):
         draft_path = Path(__file__).resolve().parents[1] / '.liskov' / 'plumage.v5.json'
         draft = json.loads(draft_path.read_text())
-        self.assertEqual(draft['release']['artifact']['digest'], release.ZERO_DIGEST)
+        release.assert_filled(draft)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             identity = self.identity(root, {'token_env': 'LISKOV_PLUMAGE_CLOUDFLARED_TOKEN'})
@@ -274,7 +274,8 @@ class BuildDocumentTests(unittest.TestCase):
         published = self.document('plumage.v5.json')
         self.assertEqual(build['release'], {'mode': 'source'})
         self.assertEqual(published['release']['mode'], 'pinned')
-        self.assertEqual(published['release']['artifact']['digest'], release.ZERO_DIGEST)
+        self.assertRegex(published['release']['artifact']['digest'], r'^sha256:[0-9a-f]{64}$')
+        self.assertNotEqual(published['release']['artifact']['digest'], release.ZERO_DIGEST)
         self.assertEqual(build['applicationId'], published['applicationId'])
         self.assertEqual(build['applicationId'], 'plumage')
         self.assertEqual(build['runtime'], published['runtime'])

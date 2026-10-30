@@ -3,7 +3,7 @@
   "schemaVersion": 5,
   "applicationId": "plumage",
   "metadata": {
-    "description": "Two plumage peers on the pinned Qwen3.5-4B model, on phones pinned for inbound IPv6 so the peers can reach each other. Unpublished draft: the artifact digest is all zeroes and the payload variables are empty until fill-v5-release.py binds a build. Spend caps are Planetarium's; the owner confirms them at publish.",
+    "description": "Two plumage peers on the pinned Qwen3.5-4B model, on phones pinned for inbound IPv6 so the peers can reach each other. Spend caps are Planetarium's.",
     "labels": [
       "plumage",
       "native",
@@ -14,7 +14,7 @@
   "release": {
     "mode": "pinned",
     "artifact": {
-      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      "digest": "sha256:ed57d35263e1b07761a7234a8b72a860f9a063af3c64a47b58ed23d58fa69047"
     }
   },
   "runtime": {
@@ -114,27 +114,27 @@
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_URL",
         "source": "literal",
-        "value": ""
+        "value": "https://gateway.pinata.cloud/ipfs/QmQXb6WTded62fMxjZAgeTj2mYZaSh6PKKRNxNdLpaQwJe https://gateway.pinata.cloud/ipfs/Qmf9fvrbk4WBqTVnQWwrq3YhkpdcULbKoUAvma3qUKrwHY https://gateway.pinata.cloud/ipfs/Qmb6oqtdzpTT51SJFEfzu1XPpUieTVeEJL1d8zJ7o66c26 https://gateway.pinata.cloud/ipfs/QmbbWNYginjynPa1MPtm92rMXutToDFU3Aqjck2AAVk35Z https://gateway.pinata.cloud/ipfs/QmZVnDK4UQBMK1yFufscmCMKSdKTRHocgJSeirbkf31MLQ https://gateway.pinata.cloud/ipfs/QmX7ZoN8Y9eKiVWBsnLz8MLKaynu28wdqcvyevWsEBisBQ https://gateway.pinata.cloud/ipfs/QmWeFJkADP6wiahT1KhBRMUm9aiayYtBDHn9RBherNGHvj https://gateway.pinata.cloud/ipfs/QmbneYyMRA1HNr2Bs5fH8UZfEYzJEpCvKzo6GpKdZzrkdD https://gateway.pinata.cloud/ipfs/QmVp8rKfDs3c3aPDJadWu8Hx1TAPYMF6ByCFnDbfbEh6kK https://gateway.pinata.cloud/ipfs/QmNxMUs1zbydpWHyF5cSjjVojjgJ7egUjYAGoxuKJKgfP9 https://gateway.pinata.cloud/ipfs/QmdPZ1UgzTax5GNm9tAURXEjtFeNCMxUHc7zemprp46x97"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_SHA256",
         "source": "literal",
-        "value": ""
+        "value": "e06659b71db1fa8980311c554531363112ee442999f19abb0772a20747882ad3"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_BYTES",
         "source": "literal",
-        "value": ""
+        "value": "41008682"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_PART_SHA256",
         "source": "literal",
-        "value": ""
+        "value": "5317a1b33884405946024e2ef77c198a19abebe8ed78011829071bd86f587350 359d729e71902630a1ee4be455ed928a457e5c903a302f0b7b0496c2edd3e2e3 45bacd971c8dc69fcad08dbd2d63f6574f3b1f58260917c78011a3f22c3b25ba 3bd1551ae5952316b2896b1b6b9791960e96c855494a0331d06a5a70f5bd720f 8753a09628ddb50e6fd95e92a4a7a1f4502439848c96728d58dfe1d63ad25b6e a20997db36e8a47e3313bb9989fcc6fc0c0aaf3c5b88e0c0178e7088c698826d 30591f486f6614da34f051cd6a27967489e142bfea055fa892ad806ac8f79b31 67f829e626e689e6f0da42adf777d9de7c01350029f81fd8dc382cca15001f74 8754465a51a61177622f2acff0b520b70fe364e9c5a6c805c6ae5597c91624f8 5b53220a057f312461864804b2e350edbce9d2f413ff09dc1999ffd2fb35fbdf 1aefc278f5d6d94b1e49922832651dffb8b5bd6c2e311cb91f83afb3fcaf108d"
       },
       {
         "name": "LISKOV_PLUMAGE_PAYLOAD_PART_BYTES",
         "source": "literal",
-        "value": ""
+        "value": "4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 4000000 1008682"
       }
     ],
     "secrets": [
