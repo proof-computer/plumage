@@ -41,24 +41,83 @@ header.wrap { display: flex; flex-wrap: wrap; align-items: center; justify-conte
 main.wrap { padding-bottom: 48px; }
 footer.wrap { display: flex; flex-direction: column; gap: 20px; padding-bottom: 40px; }
 h1 { margin: 0.4em 0; font-size: 76px; line-height: 0.98; font-weight: 800; letter-spacing: -0.035em; }
+h2 { margin: 0 0 16px; font-size: 26px; letter-spacing: -0.02em; }
+a { color: inherit; text-underline-offset: 3px; }
 a.wordmark { display: flex; flex-direction: column; gap: 8px; width: fit-content; color: inherit; text-decoration: none; font-size: 30px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
 nav[aria-label=\"Site\"] { display: flex; flex-wrap: wrap; gap: 8px; }
 nav[aria-label=\"Site\"] a { color: inherit; text-decoration: none; padding: 10px 16px; border-radius: 999px; font-size: 16px; font-weight: 600; }
 .band { display: flex; height: 10px; border-radius: 5px; overflow: hidden; box-shadow: 0 0 0 1px rgba(0,0,0,0.12); }
 .band span { flex: 1 1 0; }
 a.wordmark .band { width: 132px; height: 6px; border-radius: 3px; }
-.card { background: var(--card); color: var(--ink); border-radius: 24px; padding: 28px; box-sizing: border-box; margin: 0 0 20px; }
-.chip { display: inline-block; padding: 1px 9px; border-radius: 999px; background: var(--chip); font-weight: 600; }
+.card { background: var(--card); color: var(--ink); border-radius: 24px; padding: 28px; box-sizing: border-box; margin: 0 0 20px; box-shadow: 0 1px 0 rgba(0,0,0,0.08); }
+.chip { display: inline-block; padding: 1px 9px; border-radius: 999px; background: var(--chip); font-weight: 600; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15); font-size: 13px; }
 .mono, code, .formula p { font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+code { overflow-wrap: anywhere; }
 .muted { color: var(--muted); }
-table { border-collapse: collapse; }
-td, th { border: 1px solid var(--hairline); padding: 0.2rem; vertical-align: top; }
-details summary { list-style: none; }
+.hero { display: flex; flex-wrap: wrap; gap: 40px; align-items: flex-end; padding: 72px 0 48px; }
+.hero-text { flex: 999 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+.hero-card { flex: 1 1 380px; display: flex; flex-direction: column; gap: 18px; margin: 0; box-shadow: 0 1px 0 rgba(0,0,0,0.08), 0 18px 40px -24px rgba(0,0,0,0.45); }
+.lede { font-size: 21px; max-width: 34em; line-height: 1.45; }
+.eyebrow { font-size: 14px; letter-spacing: 0.02em; }
+.split { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.split > .main { flex: 999 1 560px; min-width: 0; }
+.split > .side { flex: 1 1 340px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+nav[aria-label=\"Days\"] { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding-top: 40px; font-size: 15px; font-weight: 600; }
+.big { font-size: 52px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
+.swatch { display: inline-block; width: 64px; height: 64px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.12); flex: none; }
+.swatch-sm { display: inline-block; width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15); flex: none; }
+.swatch-xs { display: inline-block; width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15); flex: none; }
+.bar { position: relative; height: 16px; border-radius: 8px; background: #EDEDEA; overflow: hidden; }
+.bar .fill { position: absolute; left: 0; top: 0; bottom: 0; }
+.bar .tick { position: absolute; top: 0; bottom: 0; width: 2px; background: #FFFFFF; }
+.bar-labels { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 14px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.chip-lg { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: 999px; background: var(--chip); font-weight: 600; font-size: 15px; }
+.tiles { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.tile { flex: 1 1 78px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.tile .paint { height: 96px; border-radius: 14px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.12); display: flex; align-items: flex-end; padding: 10px; box-sizing: border-box; font-size: 12px; font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+.tile a { display: flex; flex-direction: column; text-decoration: none; line-height: 1.25; }
+.tile .name { font-weight: 700; font-size: 15px; }
+.tile .id { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+.numbers { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.numbers .card { flex: 1 1 190px; margin: 0; border-radius: 20px; padding: 18px 20px; display: flex; flex-direction: column; gap: 4px; }
+.numbers .n { font-size: 40px; font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; }
+.numbers .label { font-size: 15px; font-weight: 600; }
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.timeline li { display: grid; grid-template-columns: 56px 28px minmax(0, 1fr); column-gap: 10px; padding-bottom: 22px; }
+.timeline .t { font-size: 13px; color: var(--muted); padding-top: 3px; font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+.timeline .rail { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.timeline .dot { width: 16px; height: 16px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18); margin-top: 3px; flex: none; }
+.timeline .line { width: 2px; flex: 1; background: var(--hairline); }
+.timeline .body { min-width: 0; display: flex; flex-direction: column; gap: 8px; font-size: 15px; }
+.timeline blockquote { margin: 0; font-size: 19px; line-height: 1.42; }
+.timeline .cite { font-size: 12px; padding: 4px 9px; border-radius: 8px; background: var(--chip); text-decoration: none; font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+.timeline .mark { font-size: 14px; font-weight: 600; padding: 8px 12px; border-radius: 10px; background: var(--chip); align-self: flex-start; }
+.fact { margin: 0; border-radius: 20px; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+.fact .meta { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+.fact .excerpt { margin: 0; white-space: pre-line; font-size: 17px; line-height: 1.4; }
+.fact .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; font-size: 13px; color: var(--muted); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+th { font-size: 12px; font-weight: 500; text-align: left; padding: 8px 12px; border-bottom: 1.5px solid var(--ink); font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+td { padding: 12px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+th:first-child, td:first-child { padding-left: 0; }
+th:last-child, td:last-child { padding-right: 0; }
+.num { text-align: right; font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+details summary { list-style: none; cursor: pointer; font-weight: 600; color: #3A3A3A; }
+details p { margin: 10px 0 0; font-size: 13px; line-height: 1.55; color: #3A3A3A; }
+.formula summary { font-size: 13px; font-weight: 400; color: var(--muted); }
+.formula p { margin: 6px 0 0; font-size: 12px; line-height: 1.5; }
 details summary::-webkit-details-marker { display: none; }
 details summary::marker { content: none; }
+footer .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; font-size: 15px; }
+footer .foot p { margin: 0; max-width: 36em; }
+footer nav { display: flex; flex-wrap: wrap; gap: 18px; font-weight: 600; }
 @media (max-width: 639px) {
   .wrap { padding-left: 16px; padding-right: 16px; }
   h1 { font-size: 42px; }
+  .hero { padding: 40px 0 32px; }
 }
 ";
 
@@ -186,10 +245,10 @@ fn push_header(out: &mut String, prefix: &str, section: Option<Section>, paint: 
 fn push_footer(out: &mut String, chrome: &Chrome<'_>) {
     out.push_str("<footer class=\"wrap\">\n");
     push_band(out);
-    out.push('\n');
+    out.push_str("\n<div class=\"foot\"><p>plumage is a pointless swarm. The colour is not the point; watching a swarm agree is. ");
     push_freshness(out, chrome);
     out.push_str(
-        "<p><a href=\"https://github.com/proof-computer/plumage\">Source</a> <a href=\"https://github.com/proof-computer/forthebirds\">forthebirds</a> <a href=\"https://planetarium.proof.computer/\">Planetarium</a></p>\n</footer>\n",
+        "</p><nav aria-label=\"More\"><a href=\"https://github.com/proof-computer/plumage\">Source</a> <a href=\"https://github.com/proof-computer/forthebirds\">forthebirds</a> <a href=\"https://planetarium.proof.computer/\">Planetarium</a></nav></div>\n</footer>\n",
     );
 }
 
@@ -205,7 +264,6 @@ fn push_band(out: &mut String) {
 }
 
 fn push_freshness(out: &mut String, chrome: &Chrome<'_>) {
-    out.push_str("<p>");
     out.push_str(&format!(
         "Records as of {} UTC on {}; rendered {} {} UTC",
         utc_time(chrome.as_of_ms),
@@ -222,7 +280,6 @@ fn push_freshness(out: &mut String, chrome: &Chrome<'_>) {
     } else {
         push_escaped(out, chrome.server);
     }
-    out.push_str("</p>\n");
 }
 
 fn ink_and_fill(paint: Paint) -> (String, String) {
@@ -288,6 +345,92 @@ mod tests {
             server: "peer-a",
             names,
         }
+    }
+
+    #[test]
+    fn document_styles_every_shared_component_once() {
+        let names = BTreeMap::new();
+        let html = document("Today", None, 0, &sample(Paint::NoRecord, &names), "");
+        let style = html.split_once("<style>").unwrap().1;
+        let style = style.split_once("</style>").unwrap().0;
+        let (base, phone) = style.split_once("@media (max-width: 639px)").unwrap();
+        for selector in [
+            ".hero",
+            ".hero-text",
+            ".hero-card",
+            ".lede",
+            ".eyebrow",
+            ".split",
+            ".split > .main",
+            ".split > .side",
+            "nav[aria-label=\"Days\"]",
+            "h2",
+            ".card",
+            ".big",
+            "code",
+            "a",
+            ".swatch",
+            ".swatch-sm",
+            ".swatch-xs",
+            ".bar",
+            ".bar .fill",
+            ".bar .tick",
+            ".bar-labels",
+            ".legend",
+            ".legend span",
+            ".chips",
+            ".chip",
+            ".chip-lg",
+            ".tiles",
+            ".tile",
+            ".tile .paint",
+            ".tile a",
+            ".tile .name",
+            ".tile .id",
+            ".numbers",
+            ".numbers .card",
+            ".numbers .n",
+            ".numbers .label",
+            ".timeline",
+            ".timeline li",
+            ".timeline .t",
+            ".timeline .rail",
+            ".timeline .dot",
+            ".timeline .line",
+            ".timeline .body",
+            ".timeline blockquote",
+            ".timeline .cite",
+            ".timeline .mark",
+            ".fact",
+            ".fact .meta",
+            ".fact .excerpt",
+            ".fact .foot",
+            "table",
+            "th",
+            "td",
+            "th:first-child, td:first-child",
+            "th:last-child, td:last-child",
+            ".num",
+            "details summary",
+            "details p",
+            ".formula summary",
+            ".formula p",
+            "footer .foot",
+            "footer .foot p",
+            "footer nav",
+        ] {
+            let count = base
+                .split('}')
+                .filter(|rule| {
+                    rule.split_once('{')
+                        .is_some_and(|(head, _)| head.trim() == selector)
+                })
+                .count();
+            assert_eq!(count, 1, "selector {selector}");
+        }
+        assert!(phone.contains(".hero { padding: 40px 0 32px; }"));
+        assert!(!style.contains("td, th { border: 1px solid"));
+        assert_clean(&html);
     }
 
     #[test]
@@ -380,6 +523,22 @@ mod tests {
         assert!(named.contains(
             "Records as of 00:00:00 UTC on 1970-01-01; rendered 1970-01-01 01:02:03 UTC by Wren (peer-a)"
         ));
+        assert!(named.contains(
+            "<div class=\"foot\"><p>plumage is a pointless swarm. The colour is not the point; watching a swarm agree is. Records as of 00:00:00 UTC on 1970-01-01; rendered 1970-01-01 01:02:03 UTC by Wren (peer-a)</p><nav aria-label=\"More\">"
+        ));
+        let more = named.split_once("<nav aria-label=\"More\">").unwrap().1;
+        let more = more.split_once("</nav>").unwrap().0;
+        assert_eq!(more.matches("<a ").count(), 3);
+        for (href, label) in [
+            ("https://github.com/proof-computer/plumage", "Source"),
+            (
+                "https://github.com/proof-computer/forthebirds",
+                "forthebirds",
+            ),
+            ("https://planetarium.proof.computer/", "Planetarium"),
+        ] {
+            assert!(more.contains(&format!("<a href=\"{href}\">{label}</a>")));
+        }
 
         let unnamed = document(
             "Today",
