@@ -69,11 +69,12 @@ fn recorded_days(page: &ArchivePage<'_>) -> BTreeMap<Day, Paint> {
 
 fn push_stripe(out: &mut String, days: &[&(Day, Paint)], decided: usize, undecided: usize) {
     out.push_str("<div class=\"stripe\" role=\"img\" aria-label=\"");
+    let unit = if days.len() == 1 { "day" } else { "days" };
     if let (Some((first, _)), Some((last, _))) = (days.first(), days.last()) {
         push_escaped(
             out,
             &format!(
-                "Every closed day as one stripe, oldest left: {} days from {} {} to {} {}, {decided} decided and {undecided} undecided.",
+                "Every closed day as one stripe, oldest left: {} {unit} from {} {} to {} {}, {decided} decided and {undecided} undecided.",
                 days.len(),
                 first.month_day().1,
                 first.month_name(),
@@ -84,17 +85,18 @@ fn push_stripe(out: &mut String, days: &[&(Day, Paint)], decided: usize, undecid
     } else {
         out.push_str("No day has closed yet.");
     }
-    out.push_str("\" style=\"display:flex;height:72px;border-radius:16px;overflow:hidden;background:#FFFFFF;box-shadow:0 0 0 1px rgba(0,0,0,0.12)\">");
+    out.push_str("\" style=\"height:72px;border-radius:16px;box-sizing:border-box;padding:6px;background:var(--ground);box-shadow:0 0 0 1px rgba(0,0,0,0.12)\"><div style=\"display:flex;height:100%;border-radius:10px;overflow:hidden\">");
     for (_, paint) in days {
         out.push_str("<span class=\"stripe-seg\" style=\"flex:1;background:");
         out.push_str(&paint_background(*paint));
         out.push_str("\"></span>");
     }
-    out.push_str("</div>\n");
+    out.push_str("</div></div>\n");
 }
 
 fn count_line(days: usize, decided: usize, undecided: usize) -> String {
-    format!("{days} days \u{00b7} {decided} decided \u{00b7} {undecided} undecided")
+    let unit = if days == 1 { "day" } else { "days" };
+    format!("{days} {unit} \u{00b7} {decided} decided \u{00b7} {undecided} undecided")
 }
 
 fn short_date(day: Day) -> String {
@@ -418,7 +420,11 @@ mod tests {
         assert_eq!(stripe.matches("stripe-seg").count(), 21);
         assert_eq!(stripe.matches("repeating-linear-gradient").count(), 4);
         assert!(stripe.contains("aria-label=\"Every closed day as one stripe, oldest left: 21 days from 5 October to 25 October, 17 decided and 4 undecided.\""));
-        assert!(stripe.contains("height:72px;border-radius:16px;overflow:hidden;background:#FFFFFF;box-shadow:0 0 0 1px rgba(0,0,0,0.12)"));
+        assert!(stripe.contains("height:72px;border-radius:16px;box-sizing:border-box;padding:6px;background:var(--ground);box-shadow:0 0 0 1px rgba(0,0,0,0.12)"));
+        assert!(stripe.contains(
+            "<div style=\"display:flex;height:100%;border-radius:10px;overflow:hidden\">"
+        ));
+        assert!(!stripe.contains("background:#FFFFFF;box-shadow"));
         assert!(html.contains("<div class=\"mono\" style=\"display:flex;justify-content:space-between;font-size:13px\"><span>5 OCT</span><span>21 days · 17 decided · 4 undecided</span><span>25 OCT</span></div>"));
 
         let october = section_until(
@@ -519,6 +525,21 @@ mod tests {
         assert!(row.contains("<span class=\"name\" style=\"font-weight:600\">undecided</span>"));
         assert!(row.contains("<span class=\"count mono\" style=\"text-align:right\">4</span>"));
         assert!(html.contains(DAYS_PER_COLOUR_RULE));
+        assert_markup_clean(&html);
+    }
+
+    #[test]
+    fn one_day_archive_uses_singular_in_the_count_and_stripe_label() {
+        let day: Day = "2026-10-30".parse().unwrap();
+        let days = [(day, Paint::Decided(Blue))];
+        let names = BTreeMap::new();
+        let html = render_archive(&ArchivePage {
+            days: &days,
+            chrome: chrome(day.next().open_ms(), Paint::Decided(Blue), &names),
+        });
+        assert!(html.contains("1 day · 1 decided · 0 undecided"));
+        assert!(html.contains("aria-label=\"Every closed day as one stripe, oldest left: 1 day from 30 October to 30 October, 1 decided and 0 undecided.\""));
+        assert_eq!(html.matches("stripe-seg").count(), 1);
         assert_markup_clean(&html);
     }
 

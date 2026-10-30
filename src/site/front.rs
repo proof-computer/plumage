@@ -1130,6 +1130,25 @@ mod tests {
     }
 
     #[test]
+    fn facts_formula_is_a_direct_child_of_the_side_section() {
+        let records = [sourced(
+            "peer-a",
+            "https://api.wikimedia.org/on-this-day",
+            0,
+            "a fetched fact",
+        )];
+        for evidence in [&records[..], &[][..]] {
+            let html = render_front(&page(&[], &[], evidence, None, Paint::Decided(Blue)));
+            let facts = html.split_once("id=\"facts-h\"").unwrap().1;
+            let facts = facts.split_once("</section>").unwrap().0;
+            let intro = facts.split("<article").next().unwrap();
+            assert!(intro.contains("<details class=\"formula\">"));
+            assert!(!intro.contains("<div"));
+            assert_clean(&html);
+        }
+    }
+
+    #[test]
     fn fact_cards_keep_excerpt_lines_and_escape_record_and_tile_text() {
         let record = sourced(
             "peer<&",

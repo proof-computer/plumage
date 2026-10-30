@@ -91,7 +91,7 @@ nav[aria-label=\"Days\"] { display: flex; flex-wrap: wrap; justify-content: spac
 .timeline .rail { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .timeline .dot { width: 16px; height: 16px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18); margin-top: 3px; flex: none; }
 .timeline .line { width: 2px; flex: 1; background: var(--hairline); }
-.timeline .body { min-width: 0; display: flex; flex-direction: column; gap: 8px; font-size: 15px; }
+.timeline .body { min-width: 0; display: flex; flex-direction: column; gap: 8px; font-size: 15px; overflow-wrap: anywhere; }
 .timeline blockquote { margin: 0; font-size: 19px; line-height: 1.42; }
 .timeline .cite { font-size: 12px; padding: 4px 9px; border-radius: 8px; background: var(--chip); text-decoration: none; font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
 .timeline .mark { font-size: 14px; font-weight: 600; padding: 8px 12px; border-radius: 10px; background: var(--chip); align-self: flex-start; }
@@ -109,11 +109,13 @@ details summary { list-style: none; cursor: pointer; font-weight: 600; color: #3
 details p { margin: 10px 0 0; font-size: 13px; line-height: 1.55; color: #3A3A3A; }
 .formula summary { font-size: 13px; font-weight: 400; color: var(--muted); }
 .formula p { margin: 6px 0 0; font-size: 12px; line-height: 1.5; }
+.side > .formula summary, .side > .formula p { color: inherit; }
 details summary::-webkit-details-marker { display: none; }
 details summary::marker { content: none; }
 footer .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; font-size: 15px; }
 footer .foot p { margin: 0; max-width: 36em; }
 footer nav { display: flex; flex-wrap: wrap; gap: 18px; font-weight: 600; }
+.verdict { font-size: clamp(56px, 18.5vw, 132px); line-height: 0.9; letter-spacing: -0.045em; }
 @media (max-width: 639px) {
   .wrap { padding-left: 16px; padding-right: 16px; }
   h1 { font-size: 42px; }
@@ -415,6 +417,8 @@ mod tests {
             "details p",
             ".formula summary",
             ".formula p",
+            ".side > .formula summary, .side > .formula p",
+            ".verdict",
             "footer .foot",
             "footer .foot p",
             "footer nav",
@@ -428,6 +432,22 @@ mod tests {
                 .count();
             assert_eq!(count, 1, "selector {selector}");
         }
+        for (selector, declaration) in [
+            (".timeline .body", "overflow-wrap: anywhere"),
+            (
+                ".side > .formula summary, .side > .formula p",
+                "color: inherit",
+            ),
+            (".verdict", "clamp(56px, 18.5vw, 132px)"),
+        ] {
+            let rule = base
+                .split('}')
+                .filter_map(|rule| rule.split_once('{'))
+                .find_map(|(head, body)| (head.trim() == selector).then_some(body))
+                .unwrap();
+            assert!(rule.contains(declaration), "{selector}: {rule}");
+        }
+        assert!(!phone.contains(".verdict"));
         assert!(phone.contains(".hero { padding: 40px 0 32px; }"));
         assert!(!style.contains("td, th { border: 1px solid"));
         assert_clean(&html);
