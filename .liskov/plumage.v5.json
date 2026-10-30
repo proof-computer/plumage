@@ -3,7 +3,7 @@
   "schemaVersion": 5,
   "applicationId": "plumage",
   "metadata": {
-    "description": "Two plumage peers on the pinned Qwen3.5-4B model. Unpublished draft: the artifact digest is all zeroes and the payload variables are empty until fill-v5-release.py binds a build. Spend caps are Planetarium's; the owner confirms them at publish.",
+    "description": "Two plumage peers on the pinned Qwen3.5-4B model, on phones pinned for inbound IPv6 so the peers can reach each other. Unpublished draft: the artifact digest is all zeroes and the payload variables are empty until fill-v5-release.py binds a build. Spend caps are Planetarium's; the owner confirms them at publish.",
     "labels": [
       "plumage",
       "native",
@@ -68,6 +68,31 @@
       "minimums": {
         "memory": "8GiB",
         "storage": "8GiB"
+      },
+      "processorSelection": {
+        "mode": "exact",
+        "processorIds": [
+          "5EUJ78FXKa45UpxeBv2KkNFmpatRN9bY7Vs1StrY3Bf4S8QV",
+          "5F3PRqecYKsmycp2FYcVHwEfH5P6XHP9fQPP7ksrnWLpGfEz",
+          "5E7Z4CYLcDPkVNpK59ZdekisTNmnyn2zCdfLiqwk7YuaD8LA",
+          "5GRLVCDAn7fzRtVsAYaGp3h8XbaVauxAj42VSm4X97AbVXrw",
+          "5HgMSm9XXicMpXa1hyfTSqUt3hbHTejkbouFxKUxDMTUBGkE",
+          "5CmWuubdJ9KCXHHZHeYiJpTb7FkpG3YgKPSLTE5X3ddB59FW",
+          "5EatqhfV15TDv7e45uq8rmtAaPeCoFednS1EHcBE6vfoSXxr",
+          "5GLuxrnVaS1wspyPLHwDSKBQ7NA2XTwuELwv5xGLMudZ9D6G",
+          "5CFwFvVtCKxRGiJneaPcaBJKrk6dsavQanR6qx9pHcCjXHtj",
+          "5Cf5DfnFpSrFzQpUWfT9kuxLw62cso7YsaCPu84N8Jxmgsyo",
+          "5FEGwoF3z8YAnaqb9dp7w1orrShNHkZQriLVdHSeuAeaZtvm",
+          "5EVFmwskF2T2rm8Kd6AYXxsuh99QN3NBESaidxQwDB9aHGg8",
+          "5HArDA9bau3FsDxRTihoK1XKb2GwhMMEJw1qruiZr61crKeE",
+          "5HBExkWKyhzdtB2753PwoWkSxQTmpyvGe5bUsdPBwdYfGbdP",
+          "5D58Rc8tXKWyZRGU3CTSW9iuckfVMT8d5qMPcDuEoatnxcaT",
+          "5DmYH6SRb1torxSUDazXP6WoYUPyjvbvTCiBMYLHkWeVSyvq",
+          "5Dc6wc57ErSYx2XdhUv6BAuJTJ3rJF38rRrEjWjG65UKWSrz",
+          "5FRWtKUHdgUWpENyySXp6SohewuH15CLdr7bdpPsrBJbXqrC",
+          "5G2jUSZoBCLZYN7p4hzzGNa164Ewr5HTuBJdKk8PrW54jCR6",
+          "5HiqTu7Y68HLB7YikusviwmECB4sLrcpJdakRGtaTgxS8oTd"
+        ]
       }
     }
   },

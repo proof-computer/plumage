@@ -86,6 +86,7 @@ def fixed_peer(cloud):
         'site_dir': 'state/site',
         'model_url': 'http://127.0.0.1:8081/',
         'listen': '[::]:8841',
+        'inference_timeout_seconds': 1200,
         'clock': {'real_start_ms': 0, 'sim_start_ms': 0, 'speed': 1},
         'last_day': None,
         'liskov': liskov,

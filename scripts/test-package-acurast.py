@@ -56,6 +56,7 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(item['sha256'], hashlib.sha256(data).hexdigest())
                     self.assertEqual(item['bytes'], len(data))
             self.assertEqual(peer['listen'], '[::]:8841')
+            self.assertEqual(peer['inference_timeout_seconds'], 1200)
             self.assertEqual(peer['model_url'], 'http://127.0.0.1:8081/')
             self.assertEqual(peer['data_dir'], 'state/data')
             self.assertEqual(peer['site_dir'], 'state/site')
@@ -286,7 +287,9 @@ class BuildDocumentTests(unittest.TestCase):
         })
         self.assertEqual(build['deployment']['spend']['perJob'], '1200000')
         self.assertEqual(published['deployment']['placement']['minimums'], {'memory': '8GiB', 'storage': '8GiB'})
-        self.assertNotIn('processorSelection', published['deployment']['placement'])
+        selection = published['deployment']['placement']['processorSelection']
+        self.assertEqual(selection['mode'], 'exact')
+        self.assertGreater(len(set(selection['processorIds'])), published['deployment']['jobs'])
         self.assertTrue(published['observability']['logs']['enabled'])
         self.assertEqual(published['access']['ssh']['provider']['kind'], 'liskov_managed')
         names = [item['name'] for item in published['configuration']['variables']]
