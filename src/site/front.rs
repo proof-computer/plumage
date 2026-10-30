@@ -700,6 +700,8 @@ mod tests {
     ) -> DayPage<'a> {
         DayPage {
             day: Day::from_ms(as_of_ms),
+            previous: None,
+            next: None,
             votes,
             arguments,
             evidence,
