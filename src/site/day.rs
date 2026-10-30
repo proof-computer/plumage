@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::closing::{Decision, HOLD_MS, LIVE_RULE, RULE, holds, live_voters};
 use crate::colour::Colour;
 use crate::day::Day;
-use crate::evidence::Evidence;
+use crate::evidence::{Evidence, SUNRISE_HOST, WIKIMEDIA_HOST};
 use crate::tally::{
     ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations,
     current_votes, curve, fetches, trails, vote_changes, votes_cast,
@@ -14,6 +14,7 @@ use crate::tally::{
 use super::layout::{chip, document, peer, push_escaped};
 use super::{DayPage, Section};
 
+const NOT_YET: &str = "repeating-linear-gradient(45deg,#F3F2EE 0 6px,#FFFFFF 6px 12px)";
 const HATCH: &str = "repeating-linear-gradient(45deg,#E4E3DE 0 6px,#F3F2EE 6px 12px)";
 
 /// A day's page at depth 1, painted by `chrome.painted_by`.
@@ -25,19 +26,19 @@ pub fn render_day(page: &DayPage<'_>) -> String {
     let (headline, prose, rule_heading) = decision_copy(page, live.len());
     let mut body = String::new();
     push_nav(&mut body, page);
-    body.push_str("<p class=\"mono\">");
+    body.push_str("<section class=\"hero\"><div class=\"hero-text\"><p class=\"mono eyebrow\">");
     push_escaped(&mut body, &status_line(page.day, open));
     body.push_str("</p>\n<h1 style=\"font-size:132px;line-height:0.9;letter-spacing:-0.045em\">");
     push_escaped(&mut body, &headline);
-    body.push_str("</h1>\n<p>");
+    body.push_str("</h1>\n<p class=\"lede\">");
     push_escaped(&mut body, &prose);
-    body.push_str("</p>\n");
-    let mut rules = String::from("<p class=\"mono\">");
-    rules.push_str(RULE);
-    rules.push_str("</p>\n<p class=\"mono\">");
-    rules.push_str(LIVE_RULE);
-    rules.push_str("</p>\n");
-    body.push_str(&super::layout::card(&rule_heading, &rules));
+    body.push_str("</p>\n</div><section class=\"card\" style=\"flex:1 1 340px;margin:0;border-radius:20px;padding:18px 20px\"><strong>");
+    push_escaped(&mut body, &rule_heading);
+    body.push_str("</strong><p class=\"mono\" style=\"font-size:12.5px\">");
+    body.push_str(RULE);
+    body.push_str("</p>\n<p class=\"mono\" style=\"font-size:12.5px\">");
+    body.push_str(LIVE_RULE);
+    body.push_str("</p>\n</section></section>\n");
     push_curve(&mut body, page, live.len());
     push_numbers(&mut body, page, live.len());
     push_thread(&mut body, page, &live);
@@ -109,29 +110,45 @@ fn push_nav(out: &mut String, page: &DayPage<'_>) {
 fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
     let points = curve(page.votes, page.day.open_ms(), page.day.close_ms());
     let colours = colours_present(&points);
-    out.push_str("<section class=\"card\" aria-labelledby=\"curve-h\">\n<h2 id=\"curve-h\">How the votes moved</h2>\n<div>");
+    let until = as_of(page);
+    let has_future = page.decision.is_none() && points.iter().any(|(at_ms, _)| *at_ms > until);
+    out.push_str("<section class=\"card\" aria-labelledby=\"curve-h\">\n<h2 id=\"curve-h\">How the votes moved</h2>\n<div class=\"legend\">");
     for colour in &colours {
-        out.push_str("<span><span style=\"background:");
+        out.push_str("<span><span class=\"swatch-xs\" style=\"background:");
         out.push_str(&hex(*colour));
         out.push_str("\"></span>");
         push_escaped(out, colour.name());
         out.push_str("</span>");
     }
-    out.push_str("<span><span style=\"background:");
+    out.push_str("<span><span class=\"swatch-xs\" style=\"background:");
     out.push_str(HATCH);
-    out.push_str("\"></span>not voted yet</span></div>\n");
+    out.push_str("\"></span>not voted yet</span>");
+    if has_future {
+        out.push_str("<span><span class=\"swatch-xs\" style=\"background:");
+        out.push_str(NOT_YET);
+        out.push_str("\"></span>not yet</span>");
+    }
+    out.push_str("</div>\n");
     out.push_str("<div role=\"img\" aria-label=\"");
-    push_escaped(out, &curve_label(page.decision));
+    push_escaped(out, &curve_label(page));
     out.push_str("\" style=\"position:relative\">\n<div style=\"position:relative;height:280px;display:flex;align-items:flex-end;gap:4px;border-bottom:1.5px solid #141414\">");
     out.push_str("<div style=\"position:absolute;left:0;right:0;bottom:50%;border-top:1.5px dashed #141414\"></div>");
-    out.push_str("<span style=\"position:absolute;right:0;bottom:50%\">half of ");
+    out.push_str("<span class=\"mono\" style=\"position:absolute;right:0;bottom:50%;transform:translateY(-4px);font-size:11px;background:#FFFFFF;padding:0 4px\">half of ");
     out.push_str(&live.to_string());
     out.push_str("</span>");
     push_hold_outlines(out, page, &points);
     for (at_ms, counts) in &points {
-        push_column(out, *at_ms, counts, live);
+        push_column(
+            out,
+            *at_ms,
+            counts,
+            live,
+            page.decision.is_none() && *at_ms > until,
+        );
     }
-    out.push_str("</div>\n<div style=\"display:flex;gap:4px\">");
+    out.push_str(
+        "</div>\n<div class=\"mono muted\" style=\"display:flex;gap:4px;font-size:11px\">",
+    );
     for (at_ms, _) in &points {
         out.push_str("<span style=\"flex:1;text-align:center\">");
         out.push_str(&hour_label(*at_ms));
@@ -154,7 +171,11 @@ fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
         out.push_str("</td>");
         for colour in &colours {
             out.push_str("<td>");
-            out.push_str(&counts.get(colour).copied().unwrap_or(0).to_string());
+            if page.decision.is_none() && *at_ms > until {
+                out.push('–');
+            } else {
+                out.push_str(&counts.get(colour).copied().unwrap_or(0).to_string());
+            }
             out.push_str("</td>");
         }
         out.push_str("</tr>\n");
@@ -162,10 +183,22 @@ fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
     out.push_str("</table>\n</details>\n</section>\n");
 }
 
-fn push_column(out: &mut String, at_ms: u64, counts: &BTreeMap<Colour, usize>, live: usize) {
+fn push_column(
+    out: &mut String,
+    at_ms: u64,
+    counts: &BTreeMap<Colour, usize>,
+    live: usize,
+    future: bool,
+) {
     out.push_str("<div data-hour=\"");
     out.push_str(&hhmm(at_ms));
     out.push_str("\" style=\"flex:1;height:100%;display:flex;flex-direction:column;justify-content:flex-end\"><div style=\"height:100%;display:flex;flex-direction:column-reverse\">");
+    if future {
+        out.push_str("<div data-colour=\"not-yet\" style=\"height:100%;background:");
+        out.push_str(NOT_YET);
+        out.push_str("\"></div></div></div>");
+        return;
+    }
     let mut named = 0usize;
     for colour in Colour::ALL {
         let count = counts.get(&colour).copied().unwrap_or(0);
@@ -200,63 +233,87 @@ fn push_hold_outlines(
     if points.is_empty() {
         return;
     }
-    let width = 100.0 / points.len() as f64;
-    for (from_ms, _) in lasting_holds(page) {
+    for (from_ms, to_ms) in lasting_holds(page) {
+        let complete = to_ms - from_ms >= HOLD_MS;
+        let width = (to_ms - from_ms) as f64 / HOLD_MS as f64 * 100.0 / points.len() as f64;
         out.push_str("<div style=\"position:absolute;top:-6px;bottom:-6px;left:");
         out.push_str(&format!("{:.2}", chart_left(from_ms, points.len())));
         out.push_str("%;width:");
         out.push_str(&format!("{width:.2}"));
-        out.push_str("%;box-shadow:0 0 0 2.5px #141414\"></div>");
+        if complete {
+            out.push_str("%;box-shadow:0 0 0 2.5px #141414\"></div>");
+        } else {
+            out.push_str("%;outline:2.5px dashed #141414\"></div>");
+        }
     }
 }
 
 fn push_hold_labels(out: &mut String, page: &DayPage<'_>) {
     for (from_ms, to_ms) in lasting_holds(page) {
-        out.push_str("<p>held ");
-        out.push_str(&hhmm(from_ms));
-        out.push('\u{2013}');
-        out.push_str(&hhmm(to_ms));
+        if to_ms - from_ms >= HOLD_MS {
+            out.push_str("<p>held ");
+            out.push_str(&hhmm(from_ms));
+            out.push('\u{2013}');
+            out.push_str(&hhmm(to_ms));
+        } else {
+            out.push_str("<p>holding since ");
+            out.push_str(&hhmm(from_ms));
+        }
         out.push_str("</p>\n");
     }
 }
 
 fn lasting_holds(page: &DayPage<'_>) -> Vec<(u64, u64)> {
     let live = live_voters(page.votes, page.day.open_ms(), page.day.close_ms());
-    holds(page.votes, &live, page.day.open_ms(), page.day.close_ms())
+    let until = if page.decision.is_none() {
+        as_of(page)
+    } else {
+        page.day.close_ms()
+    };
+    holds(page.votes, &live, page.day.open_ms(), until)
         .into_iter()
         .filter_map(|hold| {
-            let end = hold.to_ms.unwrap_or(page.day.close_ms());
+            let end = hold.to_ms.unwrap_or(until);
             let qualified = hold.from_ms.checked_add(HOLD_MS)?;
-            (end.saturating_sub(hold.from_ms) >= HOLD_MS).then_some((hold.from_ms, qualified))
+            if end.saturating_sub(hold.from_ms) >= HOLD_MS {
+                Some((hold.from_ms, qualified))
+            } else if page.decision.is_none() && hold.to_ms.is_none() {
+                Some((hold.from_ms, end))
+            } else {
+                None
+            }
         })
         .collect()
 }
 
-fn push_numbers(out: &mut String, page: &DayPage<'_>, live: usize) {
-    let until = page
-        .chrome
+fn as_of(page: &DayPage<'_>) -> u64 {
+    page.chrome
         .as_of_ms
-        .clamp(page.day.open_ms(), page.day.close_ms());
+        .clamp(page.day.open_ms(), page.day.close_ms())
+}
+
+fn push_numbers(out: &mut String, page: &DayPage<'_>, live: usize) {
+    let until = as_of(page);
     let cast = votes_cast(page.votes, page.day.open_ms(), until);
     let changes: usize = vote_changes(page.votes).values().sum();
     let fetched: usize = fetches(page.evidence).values().sum();
-    out.push_str("<div style=\"display:flex;flex-wrap:wrap;gap:12px\">\n");
+    out.push_str("<section class=\"numbers\" aria-label=\"The day in numbers\">\n");
     push_stat(out, live, "live voters", LIVE_RULE);
     push_stat(out, cast, "votes cast", VOTES_CAST_RULE);
     push_stat(out, changes, "vote changes", VOTE_CHANGES_RULE);
     push_stat(out, fetched, "fetches", FETCHES_RULE);
     push_stat(out, page.arguments.len(), "arguments", ARGUMENTS_RULE);
-    out.push_str("</div>\n");
+    out.push_str("</section>\n");
 }
 
 fn push_stat(out: &mut String, number: usize, label: &str, rule: &str) {
-    out.push_str("<section class=\"card\" style=\"flex:1 1 190px\"><span style=\"font-size:40px;font-weight:800\">");
+    out.push_str("<div class=\"card\"><span class=\"n\">");
     out.push_str(&number.to_string());
-    out.push_str("</span><span>");
+    out.push_str("</span><span class=\"label\">");
     push_escaped(out, label);
     out.push_str("</span>");
     push_formula(out, rule);
-    out.push_str("</section>\n");
+    out.push_str("</div>\n");
 }
 
 fn push_formula(out: &mut String, rule: &str) {
@@ -281,13 +338,12 @@ fn push_thread(out: &mut String, page: &DayPage<'_>, live: &[String]) {
         colour, held_to_ms, ..
     }) = page.decision
     {
-        let mut body = String::from("<li><span class=\"mono\">");
-        body.push_str(&hhmm(held_to_ms));
-        body.push_str("</span><p>");
+        let mut body = thread_start(held_to_ms, Some(colour));
+        body.push_str("<p class=\"mark\">");
         push_escaped(&mut body, colour.name());
         body.push_str(" held more than half for a continuous hour. Decided: ");
         push_escaped(&mut body, colour.name());
-        body.push_str(".</p></li>\n");
+        body.push_str(".</p></div></li>\n");
         items.push(ThreadItem {
             at_ms: held_to_ms,
             rank: 3,
@@ -302,11 +358,22 @@ fn push_thread(out: &mut String, page: &DayPage<'_>, live: &[String]) {
             right.tie.as_str(),
         ))
     });
-    out.push_str("<section class=\"card\" aria-labelledby=\"thread-h\">\n<h2 id=\"thread-h\">The whole day, oldest first</h2>\n<ol>\n");
+    out.push_str("<section class=\"card\" aria-labelledby=\"thread-h\">\n<h2 id=\"thread-h\">The whole day, oldest first</h2>\n<p class=\"muted\">Shown: arguments, vote changes and the moments the counts crossed half.</p>\n<ol class=\"timeline\">\n");
     for item in items {
         out.push_str(&item.body);
     }
     out.push_str("</ol>\n</section>\n");
+}
+
+fn thread_start(at_ms: u64, colour: Option<Colour>) -> String {
+    let mut body = String::from("<li><span class=\"t\">");
+    body.push_str(&hhmm(at_ms));
+    body.push_str(
+        "</span><span class=\"rail\" aria-hidden=\"true\"><span class=\"dot\" style=\"background:",
+    );
+    body.push_str(&colour.map(hex).unwrap_or_else(|| "#E4E3DE".to_owned()));
+    body.push_str("\"></span><span class=\"line\"></span></span><div class=\"body\">");
+    body
 }
 
 fn push_argument_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
@@ -322,9 +389,8 @@ fn push_argument_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
         let colour = current_votes(page.votes, argument.at_ms)
             .get(&argument.author)
             .copied();
-        let mut body = String::from("<li><span class=\"mono\">");
-        body.push_str(&hhmm(argument.at_ms));
-        body.push_str("</span><p>");
+        let mut body = thread_start(argument.at_ms, colour);
+        body.push_str("<p>");
         body.push_str(&peer(&page.chrome, &argument.author));
         body.push_str(" argued, voting ");
         if let Some(colour) = colour {
@@ -336,10 +402,10 @@ fn push_argument_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
         push_escaped(&mut body, &argument.id);
         body.push_str("</code></p>\n");
         if argument.cites.is_empty() {
-            body.push_str("<p>cites no evidence</p>\n");
+            body.push_str("<p class=\"cite\">cites no evidence</p>\n");
         } else {
             for cite in &argument.cites {
-                body.push_str("<p><a href=\"#fact-");
+                body.push_str("<p><a class=\"cite\" href=\"#fact-");
                 push_escaped(&mut body, &cite.id().0);
                 body.push_str("\">");
                 push_escaped(&mut body, cite.url().as_str());
@@ -348,7 +414,7 @@ fn push_argument_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
                 body.push_str("</a></p>\n");
             }
         }
-        body.push_str("</li>\n");
+        body.push_str("</div></li>\n");
         items.push(ThreadItem {
             at_ms: argument.at_ms,
             rank: 0,
@@ -363,14 +429,14 @@ fn push_change_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
         let mut previous = None;
         for (at_ms, colour) in trail {
             if let Some(from) = previous.filter(|from| *from != colour) {
-                let mut body = String::from("<li><span class=\"mono\">");
-                body.push_str(&hhmm(at_ms));
-                body.push_str("</span><p>");
+                let mut body = thread_start(at_ms, Some(colour));
+                body.push_str("<p>");
                 body.push_str(&peer(&page.chrome, &author));
                 body.push_str(" changed vote ");
                 body.push_str(&chip(from));
+                body.push_str(" <span aria-hidden=\"true\">→</span> ");
                 body.push_str(&chip(colour));
-                body.push_str("</p></li>\n");
+                body.push_str("</p></div></li>\n");
                 items.push(ThreadItem {
                     at_ms,
                     rank: 1,
@@ -391,15 +457,14 @@ fn push_hold_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>, live: &[Stri
             .iter()
             .filter(|author| current.get(*author) == Some(&hold.colour))
             .count();
-        let mut body = String::from("<li><span class=\"mono\">");
-        body.push_str(&hhmm(hold.from_ms));
-        body.push_str("</span><p>");
+        let mut body = thread_start(hold.from_ms, Some(hold.colour));
+        body.push_str("<p class=\"mark\">");
         push_escaped(&mut body, hold.colour.name());
         body.push_str(" holds ");
         body.push_str(&holding.to_string());
         body.push_str(" of ");
         body.push_str(&live.len().to_string());
-        body.push_str(", more than half. The hour starts.</p></li>\n");
+        body.push_str(", more than half. The hour starts.</p></div></li>\n");
         items.push(ThreadItem {
             at_ms: hold.from_ms,
             rank: 2,
@@ -419,23 +484,38 @@ fn push_facts(out: &mut String, page: &DayPage<'_>) {
     out.push_str(
         "<section aria-labelledby=\"facts-h\">\n<h2 id=\"facts-h\">The day\u{2019}s facts</h2>\n",
     );
+    out.push_str("<div style=\"display:flex;flex-wrap:wrap;gap:12px\">");
     for fact in facts {
         let id = fact.id().0.as_str();
-        out.push_str("<article id=\"fact-");
+        out.push_str("<article class=\"card fact\" id=\"fact-");
         push_escaped(out, id);
-        out.push_str("\">\n<p class=\"mono\">");
-        push_escaped(out, fact.url().as_str());
-        out.push_str(" · ");
-        push_escaped(out, id);
-        out.push_str("</p>\n<p>");
+        out.push_str("\" style=\"flex:1 1 220px\"><div class=\"meta\"><span>");
+        let source = match fact.url().host_str() {
+            Some(WIKIMEDIA_HOST) => "Wikimedia · On this day",
+            Some(SUNRISE_HOST) => "sunrise-sunset.org · London",
+            Some(host) => host,
+            None => "source",
+        };
+        push_escaped(out, source);
+        out.push_str(" · ev ");
+        push_escaped(out, &id.chars().take(8).collect::<String>());
+        out.push_str("</span></div><p class=\"excerpt\">");
         push_escaped(out, fact.excerpt());
-        out.push_str("</p>\n<p>fetched by ");
+        out.push_str(
+            "</p><p class=\"mono muted\" style=\"font-size:12px;margin:0;overflow-wrap:anywhere\">",
+        );
+        push_escaped(out, fact.url().as_str());
+        out.push_str("</p><div class=\"foot\"><span>fetched by ");
         out.push_str(&peer(&page.chrome, fact.author()));
-        out.push_str("</p>\n<p>cited ");
-        out.push_str(&cited.get(id).copied().unwrap_or(0).to_string());
-        out.push_str("</p>\n</article>\n");
+        out.push_str("</span><span>");
+        match cited.get(id).copied().unwrap_or(0) {
+            0 => out.push_str("not cited"),
+            1 => out.push_str("cited once"),
+            count => out.push_str(&format!("cited {count} times")),
+        }
+        out.push_str("</span></div></article>\n");
     }
-    out.push_str("</section>\n");
+    out.push_str("</div></section>\n");
 }
 
 fn citation_counts(arguments: &[super::ArgumentView]) -> BTreeMap<String, usize> {
@@ -457,9 +537,9 @@ fn colours_present(points: &[(u64, BTreeMap<Colour, usize>)]) -> Vec<Colour> {
         .collect()
 }
 
-fn curve_label(decision: Option<Decision>) -> String {
+fn curve_label(page: &DayPage<'_>) -> String {
     let mut label = String::from("Hourly vote counts by colour from 01:00 to 23:00 UTC");
-    match decision {
+    match page.decision {
         Some(Decision::Decided {
             colour,
             held_from_ms,
@@ -475,7 +555,11 @@ fn curve_label(decision: Option<Decision>) -> String {
         Some(Decision::Undecided) => {
             label.push_str("; no colour held for a continuous hour");
         }
-        None => label.push_str("; the day is open"),
+        None => {
+            label.push_str("; the day is open and hours after ");
+            label.push_str(&hhmm(as_of(page)));
+            label.push_str(" are not yet counted.");
+        }
     }
     label
 }
@@ -572,7 +656,7 @@ mod tests {
     use crate::colour::Colour::{self, Blue, Red};
     use crate::day::Day;
     use crate::evidence::Evidence;
-    use crate::site::support::{assert_clean, body_open, page, vote};
+    use crate::site::support::{ESCAPED, RAW, assert_clean, body_open, page, vote};
     use crate::site::{ArgumentView, Chrome, DayPage, Paint};
     use crate::tally::{
         ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, curve,
@@ -688,6 +772,11 @@ mod tests {
         assert_eq!(html.matches("<tr><td>").count(), 23);
         assert!(html.contains("aria-label=\"Hourly vote counts by colour from 01:00 to 23:00 UTC; blue held from 17:10 to 18:10\""));
 
+        assert!(!html.contains("data-colour=\"not-yet\""));
+        assert!(!html.contains("</span>not yet</span>"));
+        assert!(!html.contains("outline:2.5px dashed"));
+        assert!(html.contains("width:4.35%;box-shadow:0 0 0 2.5px #141414"));
+
         let points = curve(&votes, day.open_ms(), day.close_ms());
         assert_eq!(points.len(), 23);
         let at = day.open_ms() + 18 * 3_600_000;
@@ -715,6 +804,152 @@ mod tests {
         assert_eq!(seen, 2);
         assert!(!column.contains("not-voted-yet"));
         assert_markup_clean(&html);
+    }
+
+    #[test]
+    fn an_open_day_draws_only_observed_hours_and_bounds_the_hold_by_now() {
+        let from = 13 * HOLD_MS + 37 * 60_000;
+        let votes = [vote("ada", Blue, from)];
+        let mut shown = page(&votes, &[], &[], None, Paint::NoRecord);
+        for (now, first_future, complete) in [
+            (from + 60_000, 14, false),
+            (14 * HOLD_MS, 15, false),
+            (14 * HOLD_MS + 37 * 60_000, 15, true),
+            (14 * HOLD_MS + 40 * 60_000, 15, true),
+        ] {
+            shown.chrome.as_of_ms = now;
+            let html = render_day(&shown);
+            assert_eq!(
+                html.matches("data-colour=\"not-yet\"").count(),
+                24 - first_future
+            );
+            for hour in 1..=23 {
+                let column = column_at(&html, &format!("{hour:02}:00"));
+                if hour >= first_future {
+                    assert_eq!(column.matches("data-colour=").count(), 1);
+                    assert!(column.contains(&format!(
+                        "data-colour=\"not-yet\" style=\"height:100%;background:{}\"",
+                        super::NOT_YET
+                    )));
+                    assert!(html.contains(&format!("<tr><td>{hour:02}:00</td><td>–</td></tr>")));
+                } else {
+                    assert!(!column.contains("data-colour=\"not-yet\""));
+                    let count = usize::from(hour * HOLD_MS as usize >= from as usize);
+                    assert!(
+                        html.contains(&format!("<tr><td>{hour:02}:00</td><td>{count}</td></tr>"))
+                    );
+                }
+            }
+            assert!(html.contains("</span>not yet</span>"));
+            assert!(html.contains(&format!(
+                "; the day is open and hours after {} are not yet counted.\"",
+                super::hhmm(now)
+            )));
+            if complete {
+                assert!(html.contains("held 13:37–14:37"));
+                assert!(html.contains("width:4.35%;box-shadow:0 0 0 2.5px #141414"));
+                assert!(!html.contains("holding since"));
+                assert!(!html.contains("outline:2.5px dashed"));
+            } else {
+                assert!(html.contains("holding since 13:37"));
+                assert!(!html.contains("held 13:37–14:37"));
+                let width = (now - from) as f64 / HOLD_MS as f64 * 100.0 / 23.0;
+                assert!(html.contains(&format!("width:{width:.2}%;outline:2.5px dashed #141414")));
+            }
+            assert_markup_clean(&html);
+        }
+    }
+
+    #[test]
+    fn open_day_cutoff_clamps_to_both_day_edges() {
+        let votes = [vote("ada", Blue, 0)];
+        let mut shown = page(&votes, &[], &[], None, Paint::NoRecord);
+        shown.day = "1970-01-02".parse().unwrap();
+        let html = render_day(&shown);
+        assert_eq!(html.matches("data-colour=\"not-yet\"").count(), 23);
+        assert!(html.contains("hours after 00:00 are not yet counted."));
+        assert!(!html.contains("holding since"));
+        shown.chrome.as_of_ms = shown.day.close_ms() + HOLD_MS;
+        let html = render_day(&shown);
+        assert!(!html.contains("data-colour=\"not-yet\""));
+        assert!(!html.contains("</span>not yet</span>"));
+        assert!(html.contains("hours after 23:00 are not yet counted."));
+    }
+
+    #[test]
+    fn a_short_interrupted_hold_does_not_get_an_outline_or_label() {
+        let votes = [
+            vote("ada", Blue, 13 * HOLD_MS),
+            vote("ada", Red, 13 * HOLD_MS + 20 * 60_000),
+        ];
+        let mut shown = page(&votes, &[], &[], None, Paint::NoRecord);
+        shown.chrome.as_of_ms = 13 * HOLD_MS + 30 * 60_000;
+        let html = render_day(&shown);
+        assert!(html.contains("holding since 13:20"));
+        assert!(!html.contains("holding since 13:00"));
+        assert!(!html.contains("<p>held "));
+        assert_eq!(html.matches("outline:2.5px dashed #141414").count(), 1);
+    }
+
+    #[test]
+    fn facts_use_source_labels_and_zero_one_many_citation_phrases() {
+        let records = [
+            Evidence::new(
+                "ada".to_owned(),
+                "run".to_owned(),
+                Url::parse("https://api.wikimedia.org/fact").unwrap(),
+                0,
+                "wiki",
+            ),
+            Evidence::new(
+                "bea".to_owned(),
+                "run".to_owned(),
+                Url::parse("https://api.sunrise-sunset.org/fact").unwrap(),
+                0,
+                "sunset",
+            ),
+            Evidence::new(
+                "cy".to_owned(),
+                "run".to_owned(),
+                Url::parse("https://example.com/fact").unwrap(),
+                0,
+                "other",
+            ),
+        ];
+        let arguments = [
+            ArgumentView {
+                id: "a".to_owned(),
+                author: "ada".to_owned(),
+                at_ms: 0,
+                text: "first".to_owned(),
+                cites: vec![records[0].clone(), records[1].clone()],
+            },
+            ArgumentView {
+                id: "b".to_owned(),
+                author: "bea".to_owned(),
+                at_ms: 0,
+                text: "second".to_owned(),
+                cites: vec![records[1].clone()],
+            },
+        ];
+        let html = render_day(&page(&[], &arguments, &records, None, Paint::NoRecord));
+        for (fact, label, phrase) in [
+            (&records[0], "Wikimedia · On this day", "cited once"),
+            (&records[1], "sunrise-sunset.org · London", "cited 2 times"),
+            (&records[2], "example.com", "not cited"),
+        ] {
+            let marker = format!("<article class=\"card fact\" id=\"fact-{}\"", fact.id().0);
+            let article = html
+                .split(&marker)
+                .nth(1)
+                .unwrap()
+                .split("</article>")
+                .next()
+                .unwrap();
+            assert!(article.contains(label));
+            assert!(article.contains(phrase));
+        }
+        assert_clean(&html);
     }
 
     #[test]
@@ -767,6 +1002,20 @@ mod tests {
         assert!(html.contains("cites no evidence"));
         assert!(html.contains("red holds 1 of 1, more than half. The hour starts."));
         assert!(html.contains("blue holds 1 of 1, more than half. The hour starts."));
+        let thread = html
+            .split("<ol class=\"timeline\">")
+            .nth(1)
+            .unwrap()
+            .split("</ol>")
+            .next()
+            .unwrap();
+        assert_eq!(thread.matches("<li>").count(), 5);
+        for class in ["t", "rail", "dot", "line", "body"] {
+            assert_eq!(thread.matches(&format!("class=\"{class}\"")).count(), 5);
+        }
+        assert_eq!(thread.matches("class=\"mark\"").count(), 3);
+        assert!(thread.contains("<blockquote>hello</blockquote>"));
+        assert!(thread.contains("class=\"cite\""));
         assert_clean(&html);
     }
 
@@ -777,7 +1026,7 @@ mod tests {
             "run".to_owned(),
             Url::parse("https://example.com/fact").unwrap(),
             0,
-            "a fact",
+            &format!("a fact\n{RAW}"),
         );
         let arguments = [ArgumentView {
             id: "arg-1".to_owned(),
@@ -807,8 +1056,45 @@ mod tests {
         assert!(html.contains(&format!("id=\"fact-{id}\"")));
         assert!(html.contains(&format!("href=\"#fact-{id}\"")));
         assert!(html.contains("a fact"));
-        assert!(html.contains("cited 1"));
+        assert!(html.contains("cited once"));
         assert!(html.contains("https://example.com/fact"));
+        assert!(html.contains(&format!(
+            "<article class=\"card fact\" id=\"fact-{id}\" style=\"flex:1 1 220px\">"
+        )));
+        assert!(html.contains(&format!(
+            "<div class=\"meta\"><span>example.com · ev {}",
+            &id[..8]
+        )));
+        assert!(html.contains(&format!("<p class=\"excerpt\">a fact\n{ESCAPED}</p>")));
+        assert!(html.contains("overflow-wrap:anywhere\">https://example.com/fact</p>"));
+        assert!(html.contains("<div class=\"foot\"><span>fetched by "));
+        assert!(html.contains("<section class=\"hero\"><div class=\"hero-text\">"));
+        assert!(html.contains("class=\"mono eyebrow\""));
+        assert!(html.contains("<p class=\"lede\">"));
+        assert!(html.contains("<strong>The rule that will decide it</strong>"));
+        let numbers = html
+            .split("<section class=\"numbers\" aria-label=\"The day in numbers\">")
+            .nth(1)
+            .unwrap()
+            .split("</section>")
+            .next()
+            .unwrap();
+        assert_eq!(
+            numbers
+                .matches("<div class=\"card\"><span class=\"n\">")
+                .count(),
+            5
+        );
+        assert_eq!(numbers.matches("</span><span class=\"label\">").count(), 5);
+        assert_eq!(numbers.matches("class=\"formula\"").count(), 5);
+        let legend = html
+            .split("<div class=\"legend\">")
+            .nth(1)
+            .unwrap()
+            .split("</div>")
+            .next()
+            .unwrap();
+        assert_eq!(legend.matches("<span><span class=\"swatch-xs\"").count(), 2);
         assert_clean(&html);
     }
 
