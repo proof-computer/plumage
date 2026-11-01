@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use plumage::config::PeerConfig;
 use plumage::error::Error;
-use plumage::fetch::HttpSource;
+use plumage::fetch::{FixtureSource, HttpSource};
 use plumage::lab;
 use plumage::launch;
 use plumage::liskov;
@@ -26,11 +26,25 @@ fn main() -> ExitCode {
                 eprintln!("config: missing config.json");
                 return ExitCode::from(1);
             };
+            let fixture_source = match args.next().as_deref() {
+                None => None,
+                Some("--fixture-source") => match args.next() {
+                    Some(dir) if !dir.starts_with("--") => Some(dir),
+                    _ => {
+                        eprintln!("config: missing --fixture-source value");
+                        return ExitCode::from(1);
+                    }
+                },
+                Some(_) => {
+                    eprintln!("config: unexpected argument");
+                    return ExitCode::from(1);
+                }
+            };
             if args.next().is_some() {
                 eprintln!("config: unexpected argument");
                 return ExitCode::from(1);
             }
-            match run_peer(&path) {
+            match run_peer(&path, fixture_source.as_deref()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{error}");
@@ -70,15 +84,15 @@ fn main() -> ExitCode {
 
 fn print_usage() {
     println!("plumage {}", env!("CARGO_PKG_VERSION"));
-    println!("plumage peer <config.json>");
+    println!("plumage peer <config.json> [--fixture-source <dir>]");
     println!("plumage launch");
     println!(
-        "plumage lab --dir <path> [--peers <n>] [--model-url <url>] [--day <YYYY-MM-DD>] [--days <n>] [--speed <n>]"
+        "plumage lab --dir <path> [--peers <n>] [--model-url <url>] [--day <YYYY-MM-DD>] [--days <n>] [--speed <n>] [--fixture-source <dir>]"
     );
 }
 
 #[tokio::main]
-async fn run_peer(path: &str) -> Result<(), Error> {
+async fn run_peer(path: &str, fixture_source: Option<&str>) -> Result<(), Error> {
     let text =
         std::fs::read_to_string(path).map_err(|error| Error::new("config", error.to_string()))?;
     let config: PeerConfig =
@@ -88,12 +102,22 @@ async fn run_peer(path: &str) -> Result<(), Error> {
         watch_signals(sender).await;
     });
     if config.liskov.is_some() {
+        if fixture_source.is_some() {
+            return Err(Error::new(
+                "config",
+                "--fixture-source is unavailable in Liskov mode",
+            ));
+        }
         return liskov::run(std::path::Path::new(path), config, receiver).await;
     }
     config.validate()?;
-    let source = HttpSource::new(Duration::from_secs(config.fetch_timeout_seconds))?;
     let peers = PeerSource::from_static(config.peers.clone())?;
-    peer::run(config, source, peers, receiver).await
+    if let Some(dir) = fixture_source {
+        peer::run(config, FixtureSource::new(dir), peers, receiver).await
+    } else {
+        let source = HttpSource::new(Duration::from_secs(config.fetch_timeout_seconds))?;
+        peer::run(config, source, peers, receiver).await
+    }
 }
 
 #[tokio::main]

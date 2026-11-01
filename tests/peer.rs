@@ -16,33 +16,18 @@ use plumage::clock::DayClock;
 use plumage::colour::Colour;
 use plumage::config::PeerConfig;
 use plumage::day::Day;
-use plumage::fetch::{FetchError, Source};
+use plumage::fetch::FixtureSource;
 use plumage::peer;
 use plumage::peer::PeerSource;
 use plumage::site::ASSETS;
 use serde_json::{Value, json};
 use tokio::sync::watch;
-use url::Url;
 
 #[path = "support/mod.rs"]
 mod support;
 
 const TOKEN: &str = "fixture-only-peer-token-0123456789";
 const DAY: &str = "2026-10-26";
-
-struct EmptySource;
-
-impl Source for EmptySource {
-    fn get(&self, url: &Url) -> impl Future<Output = Result<Vec<u8>, FetchError>> + Send {
-        let url = url.clone();
-        async move {
-            Err(FetchError {
-                code: "fetch_failed",
-                message: format!("test source refuses {url}"),
-            })
-        }
-    }
-}
 
 fn wall_now() -> u64 {
     std::time::SystemTime::now()
@@ -118,7 +103,12 @@ fn start(
     shutdown: watch::Receiver<bool>,
 ) -> impl Future<Output = Result<(), plumage::error::Error>> {
     let peers = PeerSource::from_static(config.peers.clone()).expect("static peers");
-    peer::run(config, EmptySource, peers, shutdown)
+    peer::run(
+        config,
+        FixtureSource::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")),
+        peers,
+        shutdown,
+    )
 }
 
 fn required_config() -> Value {
@@ -191,6 +181,85 @@ fn binary_with_no_arguments_prints_the_usage_and_exits_0() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains(&format!("plumage {}", env!("CARGO_PKG_VERSION"))));
     assert!(text.contains("plumage peer <config.json>"));
+}
+
+#[test]
+fn peer_fixture_flag_requires_one_value_and_refuses_liskov_mode() {
+    for args in [
+        vec!["peer", "missing.json", "--fixture-source"],
+        vec!["peer", "missing.json", "--unexpected"],
+        vec!["peer", "missing.json", "--fixture-source", "--unexpected"],
+        vec![
+            "peer",
+            "missing.json",
+            "--fixture-source",
+            "fixtures",
+            "extra",
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_plumage"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .starts_with("config:")
+        );
+    }
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.json");
+    let mut config = required_config();
+    config["liskov"] = json!({"site_listen": "127.0.0.1:8840"});
+    std::fs::write(&path, config.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_plumage"))
+        .arg("peer")
+        .arg(path)
+        .args(["--fixture-source", "fixtures"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("config:"), "{stderr}");
+    assert!(
+        stderr.contains("--fixture-source is unavailable in Liskov mode"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_binary_fetches_from_the_fixture_source_and_votes() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let config = peer_config(root.path(), "p00", &model, Vec::new(), clock_at(12_000));
+    let path = root.path().join("config.json");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_plumage"))
+            .arg("peer")
+            .arg(path)
+            .arg("--fixture-source")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.abort();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status = read_json(&config.site_dir.join("status.json"));
+    assert!(status["activations"]["voted"].as_u64().unwrap() >= 1);
+    assert_eq!(status["activations"]["errors_by_code"], json!({}));
+    assert_eq!(status["fetch_failures_by_code"], json!({}));
+    let document = read_json(&config.site_dir.join(format!("days/{DAY}.json")));
+    assert_eq!(document["decision"]["colour"], "blue");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

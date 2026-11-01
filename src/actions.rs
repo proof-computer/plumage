@@ -60,6 +60,22 @@ pub enum Refusal {
     UnknownReply,
     ReplyToNonArgument,
     SelfReply,
+    VoteBeforeReading,
+    IdInText,
+}
+
+impl Refusal {
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::VoteBeforeReading => {
+                Some("fetch one source and post one argument first; a vote needs both in this run")
+            }
+            Self::IdInText => {
+                Some("put evidence ids in cites and argument ids in reply_to, not in text")
+            }
+            _ => None,
+        }
+    }
 }
 
 pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
@@ -82,6 +98,19 @@ pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
             }
             if cites.len() > MAX_CITATIONS {
                 return Err(Refusal::TooManyCitations);
+            }
+            let mut hex_run = 0;
+            if text.contains("r:a:")
+                || text.chars().any(|character| {
+                    hex_run = if character.is_ascii_hexdigit() {
+                        hex_run + 1
+                    } else {
+                        0
+                    };
+                    hex_run >= 64
+                })
+            {
+                return Err(Refusal::IdInText);
             }
             for id in cites {
                 let evidence = context
@@ -107,7 +136,18 @@ pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
                 }
             }
         }
-        Action::Vote { .. } => {}
+        Action::Vote { .. } => {
+            let fetched = context.evidence.iter().any(|evidence| {
+                evidence.author() == context.author && evidence.run() == context.run
+            });
+            let argued = context
+                .arguments
+                .iter()
+                .any(|(_, author)| author == context.author);
+            if !fetched || !argued {
+                return Err(Refusal::VoteBeforeReading);
+            }
+        }
     }
     Ok(())
 }
@@ -198,15 +238,117 @@ mod tests {
             Err(Refusal::HostNotAllowed)
         );
         // The budget applies only to fetches.
+        assert_eq!(validate(&argue("blue", vec![]), &context(&[], 3)), Ok(()));
+    }
+
+    #[test]
+    fn vote_requires_own_evidence_in_this_run_and_own_argument() {
+        let vote = Action::Vote {
+            colour: Colour::Blue,
+        };
+        let own = [("argument".into(), "a".into())];
+        let foreign = [("argument".into(), "b".into())];
+        assert_eq!(
+            validate(&vote, &context(&[], 0)),
+            Err(Refusal::VoteBeforeReading)
+        );
+        for (author, run) in [("a", "today"), ("b", "today"), ("a", "yesterday")] {
+            let records = [Evidence::new(
+                author.into(),
+                run.into(),
+                Url::parse(WIKI).unwrap(),
+                0,
+                "fact",
+            )];
+            let mut ctx = context(&records, 3);
+            for arguments in [&[][..], &foreign[..]] {
+                ctx.arguments = arguments;
+                assert_eq!(validate(&vote, &ctx), Err(Refusal::VoteBeforeReading));
+            }
+            ctx.arguments = &own;
+            assert_eq!(
+                validate(&vote, &ctx),
+                if author == "a" && run == "today" {
+                    Ok(())
+                } else {
+                    Err(Refusal::VoteBeforeReading)
+                }
+            );
+        }
+        let mut ctx = context(&[], 0);
+        ctx.arguments = &own;
+        assert_eq!(validate(&vote, &ctx), Err(Refusal::VoteBeforeReading));
+    }
+
+    #[test]
+    fn argument_ids_belong_in_structured_fields_and_refusals_explain_why() {
+        let records = [Evidence::new(
+            "a".into(),
+            "today".into(),
+            Url::parse(WIKI).unwrap(),
+            0,
+            "fact",
+        )];
+        let ctx = context(&records, 0);
+        let cites = vec![records[0].id().clone()];
+        for text in [
+            "blue today".to_owned(),
+            "a".repeat(63),
+            format!("{}g{}", "a".repeat(63), "b".repeat(63)),
+            "Ａ".repeat(64),
+        ] {
+            assert_eq!(validate(&argue(&text, cites.clone()), &ctx), Ok(()));
+        }
+        for text in [
+            "a".repeat(64),
+            "A".repeat(64),
+            "1".repeat(65),
+            "a r:a: reference".to_owned(),
+        ] {
+            assert_eq!(
+                validate(&argue(&text, cites.clone()), &ctx),
+                Err(Refusal::IdInText)
+            );
+        }
+        assert_eq!(
+            validate(&argue(&"a".repeat(ARGUMENT_CHARS + 1), cites.clone()), &ctx),
+            Err(Refusal::TextTooLong)
+        );
         assert_eq!(
             validate(
-                &Action::Vote {
-                    colour: Colour::Blue
-                },
-                &context(&[], 3)
+                &argue(&"a".repeat(64), vec![cites[0].clone(); MAX_CITATIONS + 1]),
+                &ctx
             ),
-            Ok(())
+            Err(Refusal::TooManyCitations)
         );
+        assert_eq!(
+            validate(
+                &argue(&"a".repeat(64), vec![EvidenceId("unknown".into())]),
+                &ctx
+            ),
+            Err(Refusal::IdInText)
+        );
+        assert_eq!(
+            Refusal::IdInText.reason(),
+            Some("put evidence ids in cites and argument ids in reply_to, not in text")
+        );
+        assert_eq!(
+            Refusal::VoteBeforeReading.reason(),
+            Some("fetch one source and post one argument first; a vote needs both in this run")
+        );
+        for refusal in [
+            Refusal::HostNotAllowed,
+            Refusal::BudgetExhausted,
+            Refusal::UnknownCitation,
+            Refusal::ForeignCitation,
+            Refusal::TextTooLong,
+            Refusal::TooManyCitations,
+            Refusal::UnknownReply,
+            Refusal::ReplyToNonArgument,
+            Refusal::SelfReply,
+        ] {
+            assert_eq!(refusal.reason(), None);
+        }
     }
 
     #[test]

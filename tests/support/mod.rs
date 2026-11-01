@@ -1,8 +1,8 @@
 //! Stateless fake llama-server shared with the peer and lab tests.
 //!
-//! `/apply-template` names the context's `you` and the message count.
-//! `/tokenize` encodes those two as the first token ids. `/completion` reads
-//! them back: an argue on the first step, then a vote for that peer's colour.
+//! `/apply-template` names the context's `you`, message count and date.
+//! `/tokenize` encodes them as three token ids. `/completion` reads them
+//! back: fetch, argue, then a vote for that peer's colour.
 //! Nothing is stored between calls.
 //!
 //! [`spawn`] is the peer test: `p00` votes blue and `p01` votes red, so two
@@ -57,18 +57,23 @@ async fn apply_template(Json(request): Json<Value>) -> Json<Value> {
     let content = messages[1]["content"].as_str().expect("user content");
     let context: Value = serde_json::from_str(content).expect("context json");
     let you = context["you"].as_str().expect("you");
-    Json(json!({"prompt": format!("{you} {}", messages.len())}))
+    let date = context["date"].as_str().expect("date");
+    Json(json!({"prompt": format!("{you} {} {date}", messages.len())}))
 }
 
 async fn tokenize(Json(request): Json<Value>) -> Json<Value> {
     let content = request["content"].as_str().unwrap_or("");
-    if let Some((you, count)) = content.split_once(' ')
+    let parts: Vec<_> = content.split_whitespace().collect();
+    if let [you, count, date] = parts.as_slice()
         && !you.contains('{')
-        && let Some(id) = encode_peer(you)
         && let Ok(count) = count.parse::<i32>()
         && count >= 0
+        && let Ok(day) = date.parse::<plumage::day::Day>()
     {
-        return Json(json!({"tokens": [id, count]}));
+        // Runtime-derived Liskov ids do not fit the compact palette token.
+        // Keep their count and day; completion uses its default palette entry.
+        let id = encode_peer(you).unwrap_or(0);
+        return Json(json!({"tokens": [id, count, day.open_ms() / 86_400_000]}));
     }
     Json(json!({"tokens": [1]}))
 }
@@ -79,6 +84,10 @@ async fn completion(State(palette): State<Palette>, Json(request): Json<Value>) 
     let messages = prompt.get(1).and_then(Value::as_i64).unwrap_or(0);
     let you = decode_peer(id).unwrap_or_else(|| "p00".to_owned());
     let action = if messages <= 2 {
+        let day_number = prompt.get(2).and_then(Value::as_u64).expect("day number");
+        let day = plumage::day::Day::from_ms(day_number * 86_400_000);
+        json!({"action": "fetch", "url": plumage::fetch::sources(&day)[0]})
+    } else if messages == 4 {
         let text = if palette.lab {
             format!("argument from {you}")
         } else {
