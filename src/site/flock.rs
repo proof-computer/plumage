@@ -2,11 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::closing::LIVE_RULE;
 use crate::colour::Colour;
 use crate::day::utc_time;
 use crate::tally::{
-    ARGUMENTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE, TRAIL_RULE, VOTE_CHANGES_RULE, current_votes,
-    fetches, trails, vote_changes,
+    ARGUMENTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE, TRAIL_RULE, VOTE_CHANGES_RULE, fetches,
+    live_votes, trails, vote_changes,
 };
 
 use super::layout::{card, chip, document, push_escaped};
@@ -18,8 +19,7 @@ const HERO_TAIL: &str = " each a small model on its own machine. None is given a
 const NAMES_NOTE: &str = "Names are drawn from a hash of the peer id and are only for reading. \
      The peer id is the identity.";
 
-const GROUP_NOTE: &str = "A group here is only the peers whose newest vote names the same \
-     colour. It says nothing about why.";
+const GROUP_NOTE: &str = "A group here is only the live voters whose newest vote names the same colour. It says nothing about why.";
 
 struct Peer {
     id: String,
@@ -146,12 +146,14 @@ fn groups(page: &DayPage<'_>) -> String {
     // the page; `formula` would escape its apostrophes.
     body.push_str("<details class=\"formula\"><summary>formula</summary><p class=\"mono\">");
     body.push_str(CURRENT_VOTES_RULE);
+    body.push_str("</p><p class=\"mono\">");
+    body.push_str(LIVE_RULE);
     body.push_str("</p></details>");
     body
 }
 
 fn push_columns(out: &mut String, page: &DayPage<'_>) {
-    let current = current_votes(page.votes, page.chrome.as_of_ms);
+    let current = live_votes(page.votes, page.day.open_ms(), page.chrome.as_of_ms);
     let mut grouped: BTreeMap<Colour, Vec<(String, String)>> = BTreeMap::new();
     for (author, colour) in current {
         grouped
@@ -304,9 +306,36 @@ mod tests {
 
     const MINUTE_MS: u64 = 60_000;
 
+    #[test]
+    fn groups_only_live_voters_but_the_table_keeps_expired_authors() {
+        let votes = [
+            support::vote("a", Blue, 9 * 3_600_000),
+            support::vote("b", Red, 10 * 3_600_000),
+        ];
+        let mut shown = page(&votes, &[], &[], None, Paint::NoRecord);
+        shown.chrome.as_of_ms = 10 * 3_600_000 + 30 * MINUTE_MS;
+        let html = render_flock(&shown);
+        let groups = html.split("Every peer today").next().unwrap();
+        assert_eq!(groups.matches("1 1 150px;").count(), 1);
+        assert!(groups.contains(
+            ">red</span><span style=\"font-weight:800;font-size:34px;line-height:1\">1</span>"
+        ));
+        assert!(!groups.contains(">blue</span>"));
+        assert!(groups.contains(
+            "A group here is only the live voters whose newest vote names the same colour."
+        ));
+        for rule in [CURRENT_VOTES_RULE, crate::closing::LIVE_RULE] {
+            assert!(groups.contains(&format!("<p class=\"mono\">{rule}</p>")));
+        }
+        let row = row_after(&html, "font-size:12px\">a</span>");
+        assert!(row.contains("<td class=\"num\">09:00</td>"));
+        assert_marked_clean(&html);
+    }
+
     fn assert_rules(html: &str) {
         for rule in [
             CURRENT_VOTES_RULE,
+            crate::closing::LIVE_RULE,
             VOTE_CHANGES_RULE,
             TRAIL_RULE,
             FETCHES_RULE,

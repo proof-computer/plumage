@@ -8,7 +8,7 @@ use crate::day::Day;
 use crate::evidence::{Evidence, SUNRISE_HOST, WIKIMEDIA_HOST};
 use crate::tally::{
     ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations,
-    current_votes, curve, fetches, trails, vote_changes, votes_cast,
+    counts, current_votes, curve, fetches, trails, vote_changes, votes_cast,
 };
 
 use super::layout::{chip, document, peer, push_escaped};
@@ -21,7 +21,7 @@ const HATCH: &str = "repeating-linear-gradient(45deg,#E4E3DE 0 6px,#F3F2EE 6px 1
 ///
 /// `decision: None` is the live day. A `Some` decision is that day after close.
 pub fn render_day(page: &DayPage<'_>) -> String {
-    let live = live_voters(page.votes, page.day.open_ms(), page.day.close_ms());
+    let live = live_voters(page.votes, page.day.open_ms(), as_of(page));
     let open = page.decision.is_none();
     let (headline, prose, rule_heading) = decision_copy(page, live.len());
     let mut body = String::new();
@@ -39,9 +39,9 @@ pub fn render_day(page: &DayPage<'_>) -> String {
     body.push_str("</p>\n<p class=\"mono\" style=\"font-size:12.5px\">");
     body.push_str(LIVE_RULE);
     body.push_str("</p>\n</section></section>\n");
-    push_curve(&mut body, page, live.len());
+    push_curve(&mut body, page);
     push_numbers(&mut body, page, live.len());
-    push_thread(&mut body, page, &live);
+    push_thread(&mut body, page);
     push_facts(&mut body, page);
     document(
         &long_date(page.day),
@@ -62,9 +62,10 @@ fn decision_copy(page: &DayPage<'_>, live: usize) -> (String, String, String) {
         }) => (
             format!("{}.", capitalise(colour.name())),
             format!(
-                "Decided: {}, held by more than half of the {live} live voters from {} to {} UTC. It painted {painted}.",
+                "Decided: {}, held by more than half of the live voters from {} to {} UTC; {live} live voters at {}. It painted {painted}.",
                 colour.name(),
                 hhmm(held_from_ms),
+                hhmm(held_to_ms),
                 hhmm(held_to_ms)
             ),
             "The rule that decided it".to_owned(),
@@ -123,7 +124,7 @@ fn outcome(paint: Paint) -> &'static str {
     }
 }
 
-fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
+fn push_curve(out: &mut String, page: &DayPage<'_>) {
     let points = curve(page.votes, page.day.open_ms(), page.day.close_ms());
     let colours = colours_present(&points);
     let until = as_of(page);
@@ -138,7 +139,7 @@ fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
     }
     out.push_str("<span><span class=\"swatch-xs\" style=\"background:");
     out.push_str(HATCH);
-    out.push_str("\"></span>not voted yet</span>");
+    out.push_str("\"></span>no live voters</span>");
     if has_future {
         out.push_str("<span><span class=\"swatch-xs\" style=\"background:");
         out.push_str(NOT_YET);
@@ -149,8 +150,7 @@ fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
     push_escaped(out, &curve_label(page));
     out.push_str("\" style=\"position:relative\">\n<div style=\"position:relative;height:280px;display:flex;align-items:flex-end;gap:4px;border-bottom:1.5px solid #141414\">");
     out.push_str("<div style=\"position:absolute;left:0;right:0;bottom:50%;border-top:1.5px dashed #141414\"></div>");
-    out.push_str("<span class=\"mono\" style=\"position:absolute;right:0;bottom:50%;transform:translateY(-4px);font-size:11px;background:#FFFFFF;padding:0 4px\">half of ");
-    out.push_str(&live.to_string());
+    out.push_str("<span class=\"mono\" style=\"position:absolute;right:0;bottom:50%;transform:translateY(-4px);font-size:11px;background:#FFFFFF;padding:0 4px\">half of the live voters");
     out.push_str("</span>");
     push_hold_outlines(out, page, &points);
     for (at_ms, counts) in &points {
@@ -158,7 +158,6 @@ fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
             out,
             *at_ms,
             counts,
-            live,
             page.decision.is_none() && *at_ms > until,
         );
     }
@@ -199,13 +198,7 @@ fn push_curve(out: &mut String, page: &DayPage<'_>, live: usize) {
     out.push_str("</table>\n</details>\n</section>\n");
 }
 
-fn push_column(
-    out: &mut String,
-    at_ms: u64,
-    counts: &BTreeMap<Colour, usize>,
-    live: usize,
-    future: bool,
-) {
+fn push_column(out: &mut String, at_ms: u64, counts: &BTreeMap<Colour, usize>, future: bool) {
     out.push_str("<div data-hour=\"");
     out.push_str(&hhmm(at_ms));
     out.push_str("\" style=\"flex:1;height:100%;display:flex;flex-direction:column;justify-content:flex-end\"><div style=\"height:100%;display:flex;flex-direction:column-reverse\">");
@@ -215,27 +208,24 @@ fn push_column(
         out.push_str("\"></div></div></div>");
         return;
     }
-    let mut named = 0usize;
+    let total = counts.values().sum();
+    if total == 0 {
+        out.push_str("<div data-colour=\"no-live-voters\" style=\"height:100%;background:");
+        out.push_str(HATCH);
+        out.push_str("\"></div></div></div>");
+        return;
+    }
     for colour in Colour::ALL {
         let count = counts.get(&colour).copied().unwrap_or(0);
         if count == 0 {
             continue;
         }
-        named += count;
         out.push_str("<div data-colour=\"");
         out.push_str(colour.name());
         out.push_str("\" style=\"height:");
-        out.push_str(&percent(count, live));
+        out.push_str(&percent(count, total));
         out.push_str("%;background:");
         out.push_str(&hex(colour));
-        out.push_str("\"></div>");
-    }
-    let remainder = live.saturating_sub(named);
-    if remainder > 0 {
-        out.push_str("<div data-colour=\"not-voted-yet\" style=\"height:");
-        out.push_str(&percent(remainder, live));
-        out.push_str("%;background:");
-        out.push_str(HATCH);
         out.push_str("\"></div>");
     }
     out.push_str("</div></div>");
@@ -280,13 +270,12 @@ fn push_hold_labels(out: &mut String, page: &DayPage<'_>) {
 }
 
 fn lasting_holds(page: &DayPage<'_>) -> Vec<(u64, u64)> {
-    let live = live_voters(page.votes, page.day.open_ms(), page.day.close_ms());
     let until = if page.decision.is_none() {
         as_of(page)
     } else {
         page.day.close_ms()
     };
-    holds(page.votes, &live, page.day.open_ms(), until)
+    holds(page.votes, page.day.open_ms(), until)
         .into_iter()
         .filter_map(|hold| {
             let end = hold.to_ms.unwrap_or(until);
@@ -303,9 +292,14 @@ fn lasting_holds(page: &DayPage<'_>) -> Vec<(u64, u64)> {
 }
 
 fn as_of(page: &DayPage<'_>) -> u64 {
-    page.chrome
-        .as_of_ms
-        .clamp(page.day.open_ms(), page.day.close_ms())
+    match page.decision {
+        Some(Decision::Decided { held_to_ms, .. }) => held_to_ms,
+        Some(Decision::Undecided) => page.day.close_ms(),
+        None => page
+            .chrome
+            .as_of_ms
+            .clamp(page.day.open_ms(), page.day.close_ms()),
+    }
 }
 
 fn push_numbers(out: &mut String, page: &DayPage<'_>, live: usize) {
@@ -314,7 +308,12 @@ fn push_numbers(out: &mut String, page: &DayPage<'_>, live: usize) {
     let changes: usize = vote_changes(page.votes).values().sum();
     let fetched: usize = fetches(page.evidence).values().sum();
     out.push_str("<section class=\"numbers\" aria-label=\"The day in numbers\">\n");
-    push_stat(out, live, "live voters", LIVE_RULE);
+    push_stat(
+        out,
+        live,
+        &format!("live voters at {}", hhmm(until)),
+        LIVE_RULE,
+    );
     push_stat(out, cast, "votes cast", VOTES_CAST_RULE);
     push_stat(out, changes, "vote changes", VOTE_CHANGES_RULE);
     push_stat(out, fetched, "fetches", FETCHES_RULE);
@@ -345,11 +344,11 @@ struct ThreadItem {
     body: String,
 }
 
-fn push_thread(out: &mut String, page: &DayPage<'_>, live: &[String]) {
+fn push_thread(out: &mut String, page: &DayPage<'_>) {
     let mut items = Vec::new();
     push_argument_items(&mut items, page);
     push_change_items(&mut items, page);
-    push_hold_items(&mut items, page, live);
+    push_hold_items(&mut items, page);
     if let Some(Decision::Decided {
         colour, held_to_ms, ..
     }) = page.decision
@@ -465,14 +464,22 @@ fn push_change_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
     }
 }
 
-fn push_hold_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>, live: &[String]) {
-    let runs = holds(page.votes, live, page.day.open_ms(), page.day.close_ms());
+fn push_hold_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
+    let runs = holds(
+        page.votes,
+        page.day.open_ms(),
+        if page.decision.is_none() {
+            as_of(page)
+        } else {
+            page.day.close_ms()
+        },
+    );
     for hold in runs {
-        let current = current_votes(page.votes, hold.from_ms);
-        let holding = live
-            .iter()
-            .filter(|author| current.get(*author) == Some(&hold.colour))
-            .count();
+        let live = live_voters(page.votes, page.day.open_ms(), hold.from_ms);
+        let holding = counts(page.votes, page.day.open_ms(), hold.from_ms)
+            .get(&hold.colour)
+            .copied()
+            .unwrap_or(0);
         let mut body = thread_start(hold.from_ms, Some(hold.colour));
         body.push_str("<p class=\"mark\">");
         push_escaped(&mut body, hold.colour.name());
@@ -699,6 +706,8 @@ mod tests {
         assert!(html.contains("<h1 class=\"verdict\">Blue.</h1>"));
         assert!(!html.contains("font-size:132px"));
         assert!(html.contains("from 00:00 to 01:00 UTC"));
+        assert!(html.contains("; 0 live voters at 01:00."));
+        assert!(html.contains("live voters at 01:00</span>"));
         assert!(html.contains("It painted Friday 2 January."));
         assert!(html.contains(RULE));
         assert!(html.contains(LIVE_RULE));
@@ -803,7 +812,7 @@ mod tests {
             votes.push(vote(
                 &format!("p{index:02}"),
                 Red,
-                day.open_ms() + 3_600_000,
+                day.open_ms() + 16 * HOLD_MS + 40 * 60_000,
             ));
         }
         for index in 5..12 {
@@ -864,7 +873,7 @@ mod tests {
                 continue;
             }
             seen += 1;
-            let millis = count * 100_000 / 12;
+            let millis = count * 100_000 / counts.values().sum::<usize>();
             let height = format!("{}.{:03}", millis / 1_000, millis % 1_000);
             let needle = format!(
                 "data-colour=\"{}\" style=\"height:{height}%;",
@@ -872,8 +881,12 @@ mod tests {
             );
             assert!(column.contains(&needle), "missing {needle} in {column}");
         }
-        assert_eq!(seen, 2);
-        assert!(!column.contains("not-voted-yet"));
+        assert_eq!(seen, 1);
+        assert!(column.contains("data-colour=\"blue\" style=\"height:100.000%;"));
+        assert!(column_at(&html, "17:00").contains("data-colour=\"red\" style=\"height:100.000%;"));
+        assert!(html.contains("half of the live voters"));
+        assert!(html.contains("</span>no live voters</span>"));
+        assert!(!html.contains("not-voted-yet"));
         assert_markup_clean(&html);
     }
 

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::closing::Vote;
+use crate::closing::{Vote, live_voters};
 use crate::colour::Colour;
 use crate::evidence::{Evidence, EvidenceId};
 
@@ -12,12 +12,11 @@ use crate::evidence::{Evidence, EvidenceId};
 const HOUR_MS: u64 = 3_600_000;
 
 pub const CURRENT_VOTES_RULE: &str = "An author's current vote is that author's newest vote at or before the time. Votes sharing a time are ordered by (at_ms, author, colour), and the last of those is current.";
-pub const COUNTS_RULE: &str =
-    "Each colour's count is the number of authors whose current vote is that colour.";
+pub const COUNTS_RULE: &str = "Each colour's count is the number of live voters at the time whose current vote is that colour. An author who is not a live voter at the time is not counted.";
 pub const VOTE_CHANGES_RULE: &str = "A vote change is a vote whose colour differs from that author's previous vote. The first vote and a repeat of the same colour are not changes.";
 pub const REPLIES_RULE: &str = "A reply is an argument that names another author's argument as reply_to. The day's reply count is the number of such arguments.";
 pub const REPLY_LED_CHANGES_RULE: &str = "A reply-led change is a vote change (see the vote change rule) by an author who received at least one reply after that author's previous vote and at or before the changing vote. Each change counts once, however many replies came before it.";
-pub const CURVE_RULE: &str = "The curve is the colour counts at every whole hour from one hour after the day's open through the day's close.";
+pub const CURVE_RULE: &str = "The curve is the colour counts over the live voters at every whole hour from one hour after the day's open through the day's close.";
 pub const FETCHES_RULE: &str =
     "An author's fetch count is the number of evidence records that author stored.";
 pub const VOTES_CAST_RULE: &str =
@@ -41,10 +40,19 @@ pub fn current_votes(votes: &[Vote], at_ms: u64) -> BTreeMap<String, Colour> {
     current
 }
 
-/// Authors per colour at `at_ms`. Colours nobody currently holds are absent.
-pub fn counts(votes: &[Vote], at_ms: u64) -> BTreeMap<Colour, usize> {
+/// Current votes restricted to the authors live at `at_ms`.
+pub fn live_votes(votes: &[Vote], open_ms: u64, at_ms: u64) -> BTreeMap<String, Colour> {
+    let live: BTreeSet<_> = live_voters(votes, open_ms, at_ms).into_iter().collect();
+    current_votes(votes, at_ms)
+        .into_iter()
+        .filter(|(author, _)| live.contains(author))
+        .collect()
+}
+
+/// Live authors per colour at `at_ms`. Colours nobody live holds are absent.
+pub fn counts(votes: &[Vote], open_ms: u64, at_ms: u64) -> BTreeMap<Colour, usize> {
     let mut counts = BTreeMap::new();
-    for colour in current_votes(votes, at_ms).values() {
+    for colour in live_votes(votes, open_ms, at_ms).values() {
         *counts.entry(*colour).or_default() += 1;
     }
     counts
@@ -123,7 +131,7 @@ pub fn curve(votes: &[Vote], open_ms: u64, close_ms: u64) -> Vec<(u64, BTreeMap<
         None => return points,
     };
     while at <= close_ms {
-        points.push((at, counts(votes, at)));
+        points.push((at, counts(votes, open_ms, at)));
         match at.checked_add(HOUR_MS) {
             Some(next) => at = next,
             None => break,
@@ -293,8 +301,8 @@ mod tests {
     #[test]
     fn counts_vote_changes_and_curve_match_the_fixed_list() {
         let votes = fixed_votes();
-        assert_eq!(counts(&votes, 0), BTreeMap::from([(Red, 1), (Blue, 1)]));
-        assert_eq!(counts(&votes, HOUR_MS), BTreeMap::from([(Blue, 2)]));
+        assert_eq!(counts(&votes, 0, 0), BTreeMap::from([(Red, 1), (Blue, 1)]));
+        assert_eq!(counts(&votes, 0, HOUR_MS), BTreeMap::from([(Blue, 2)]));
         assert_eq!(
             vote_changes(&votes),
             BTreeMap::from([
@@ -310,8 +318,25 @@ mod tests {
         assert_eq!(points[0].0, HOUR_MS);
         assert_eq!(points[0].1, BTreeMap::from([(Blue, 2)]));
         assert_eq!(points[22].0, close);
-        assert_eq!(points[22].1, BTreeMap::from([(Blue, 2), (Red, 1)]));
+        assert_eq!(points[22].1, BTreeMap::from([(Red, 1)]));
         assert!(curve(&votes, close, HOUR_MS).is_empty());
+    }
+
+    #[test]
+    fn live_votes_expire_while_current_votes_keep_all_authors() {
+        let votes = fixed_votes();
+        assert_eq!(
+            live_votes(&votes, 0, 23 * HOUR_MS),
+            BTreeMap::from([("cy".to_owned(), Red)])
+        );
+        assert_eq!(
+            current_votes(&votes, 23 * HOUR_MS),
+            BTreeMap::from([
+                ("ada".to_owned(), Blue),
+                ("bea".to_owned(), Blue),
+                ("cy".to_owned(), Red)
+            ])
+        );
     }
 
     #[test]

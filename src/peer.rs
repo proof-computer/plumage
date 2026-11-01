@@ -683,8 +683,12 @@ async fn write_closed_day(config: &PeerConfig, book: &Book, day: Day) -> Result<
     let frame = frame_from(&index, &config.clock);
     let open = day.open_ms();
     let close = day.close_ms();
-    let live = closing::live_voters(&frame.votes, open, close);
-    let decision = closing::decide(&frame.votes, &live, open, close);
+    let decision = closing::decide(&frame.votes, open, close);
+    let instant = match decision {
+        Decision::Decided { held_to_ms, .. } => held_to_ms,
+        Decision::Undecided => close,
+    };
+    let live = closing::live_voters(&frame.votes, open, instant);
     let now = config.clock.now_ms();
     let names = display_names(&config.peer_id, authors(&index));
     let paint = paint_of(&decision);

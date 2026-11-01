@@ -130,7 +130,7 @@ pub fn render_status(input: &StatusInput<'_>) -> Vec<u8> {
     let mut authors_seen: Vec<&str> = input.authors_seen.iter().map(String::as_str).collect();
     let authors_truncated = authors_seen.len() > MAX_AUTHORS;
     authors_seen.truncate(MAX_AUTHORS);
-    let counts = tally::counts(input.votes, input.as_of_sim_ms)
+    let counts = tally::counts(input.votes, input.day.open_ms(), until)
         .into_iter()
         .map(|(colour, count)| (colour.name(), count))
         .collect::<BTreeMap<_, _>>();
@@ -576,10 +576,8 @@ mod tests {
             vote("close", Colour::Blue, close),
             vote("after-close", Colour::Red, close + 1),
         ];
-        assert_eq!(
-            parse(&fixture.render())["live_voters"],
-            json!(["close", "open"])
-        );
+        assert_eq!(parse(&fixture.render())["live_voters"], json!(["close"]));
+        assert_eq!(parse(&fixture.render())["counts"], json!({"blue": 1}));
     }
 
     #[test]
