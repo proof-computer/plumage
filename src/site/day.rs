@@ -7,8 +7,8 @@ use crate::colour::Colour;
 use crate::day::Day;
 use crate::evidence::{Evidence, SUNRISE_HOST, WIKIMEDIA_HOST};
 use crate::tally::{
-    ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations,
-    counts, current_votes, curve, fetches, trails, vote_changes, votes_cast,
+    ARGUE_LABEL_RULE, ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE,
+    citations, counts, curve, fetches, trails, vote_after, vote_changes, votes_cast,
 };
 
 use super::layout::{chip, document, peer, push_escaped};
@@ -373,7 +373,9 @@ fn push_thread(out: &mut String, page: &DayPage<'_>) {
             right.tie.as_str(),
         ))
     });
-    out.push_str("<section class=\"card\" aria-labelledby=\"thread-h\">\n<h2 id=\"thread-h\">The whole day, oldest first</h2>\n<p class=\"muted\">Shown: arguments, vote changes and the moments the counts crossed half.</p>\n<ol class=\"timeline\">\n");
+    out.push_str("<section class=\"card\" aria-labelledby=\"thread-h\">\n<h2 id=\"thread-h\">The whole day, oldest first</h2>\n<p class=\"muted\">Shown: arguments, vote changes and the moments the counts crossed half.</p>\n");
+    push_formula(out, ARGUE_LABEL_RULE);
+    out.push_str("<ol class=\"timeline\">\n");
     for item in items {
         out.push_str(&item.body);
     }
@@ -401,15 +403,15 @@ fn push_argument_items(items: &mut Vec<ThreadItem>, page: &DayPage<'_>) {
         ))
     });
     for argument in arguments {
-        let colour = current_votes(page.votes, argument.at_ms)
-            .get(&argument.author)
-            .copied();
+        let colour = vote_after(page.votes, &argument.author, argument.at_ms);
         let mut body = thread_start(argument.at_ms, colour);
         body.push_str("<p>");
         body.push_str(&peer(&page.chrome, &argument.author));
-        body.push_str(" argued, voting ");
         if let Some(colour) = colour {
+            body.push_str(" argued, then voted ");
             body.push_str(&chip(colour));
+        } else {
+            body.push_str(" argued, not voted yet");
         }
         body.push_str("</p>\n<blockquote>");
         push_escaped(&mut body, &argument.text);
@@ -682,7 +684,8 @@ mod tests {
     use crate::site::support::{ESCAPED, RAW, assert_clean, body_open, page, vote};
     use crate::site::{ArgumentView, Chrome, DayPage, Paint};
     use crate::tally::{
-        ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, curve,
+        ARGUE_LABEL_RULE, ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE,
+        VOTES_CAST_RULE, curve,
     };
 
     #[test]
@@ -1102,6 +1105,49 @@ mod tests {
         assert_eq!(thread.matches("class=\"mark\"").count(), 3);
         assert!(thread.contains("<blockquote>hello</blockquote>"));
         assert!(thread.contains("class=\"cite\""));
+        let labelled = thread
+            .split("<li>")
+            .find(|item| item.contains("<blockquote>hello"))
+            .unwrap();
+        assert!(labelled.contains(&format!(
+            "<p><code>ada</code> argued, then voted {}</p>",
+            super::chip(Blue)
+        )));
+        assert!(labelled.contains("class=\"dot\" style=\"background:#0000FF\""));
+        let section = html
+            .split_once("aria-labelledby=\"thread-h\"")
+            .unwrap()
+            .1
+            .split_once("</section>")
+            .unwrap()
+            .0;
+        assert_eq!(html.matches(ARGUE_LABEL_RULE).count(), 1);
+        assert!(
+            section
+                .find("Shown: arguments, vote changes and the moments the counts crossed half.")
+                .unwrap()
+                < section.find(ARGUE_LABEL_RULE).unwrap()
+        );
+        assert!(
+            section.find(ARGUE_LABEL_RULE).unwrap()
+                < section.find("<ol class=\"timeline\">").unwrap()
+        );
+        assert_clean(&html);
+
+        let mut later_arguments = arguments.to_vec();
+        later_arguments[0].at_ms = 4 * 3_600_000;
+        let later = DayPage {
+            arguments: &later_arguments,
+            ..shown
+        };
+        let html = render_day(&later);
+        let unvoted = html
+            .split("<li>")
+            .find(|item| item.contains("<blockquote>hello"))
+            .unwrap();
+        assert!(unvoted.contains("<p><code>ada</code> argued, not voted yet</p>"));
+        assert!(unvoted.contains("class=\"dot\" style=\"background:#E4E3DE\""));
+        assert_eq!(html.matches(ARGUE_LABEL_RULE).count(), 1);
         assert_clean(&html);
     }
 

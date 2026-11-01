@@ -6,11 +6,11 @@ use crate::closing::LIVE_RULE;
 use crate::colour::Colour;
 use crate::day::utc_time;
 use crate::tally::{
-    ARGUMENTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE, TRAIL_RULE, VOTE_CHANGES_RULE, fetches,
-    live_votes, trails, vote_changes,
+    ARGUMENTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE, SPAN_RULE, Span, TRAIL_RULE,
+    VOTE_CHANGES_RULE, fetches, live_votes, spans, trails, vote_changes,
 };
 
-use super::layout::{card, chip, document, push_escaped};
+use super::layout::{card, document, push_escaped};
 use super::{DayPage, Section};
 
 const HERO_TAIL: &str = " each a small model on its own machine. None is given a personality. \
@@ -24,7 +24,7 @@ const GROUP_NOTE: &str = "A group here is only the live voters whose newest vote
 struct Peer {
     id: String,
     display: String,
-    trail: Vec<Colour>,
+    trail: Vec<Span>,
     changes: usize,
     fetches: usize,
     arguments: usize,
@@ -119,7 +119,7 @@ fn peer_rows(page: &DayPage<'_>) -> Vec<Peer> {
             display: display_name(page, id),
             trail: vote_trails
                 .get(id)
-                .map(|votes| votes.iter().map(|(_, colour)| *colour).collect())
+                .map(|votes| spans(votes))
                 .unwrap_or_default(),
             changes: changes.get(id).copied().unwrap_or(0),
             fetches: fetch_counts.get(id).copied().unwrap_or(0),
@@ -233,8 +233,20 @@ fn push_table(out: &mut String, page: &DayPage<'_>, rows: &[Peer]) {
             out.push_str("no vote yet");
         } else {
             out.push_str("<span class=\"chips\" style=\"gap:4px\">");
-            for colour in &row.trail {
-                out.push_str(&chip(*colour));
+            for span in &row.trail {
+                let [red, green, blue] = span.colour.srgb();
+                let ink = contrasting_text(span.colour.srgb());
+                out.push_str(&format!(
+                    "<span class=\"chip\" style=\"background:#{red:02X}{green:02X}{blue:02X};color:{ink}\">"
+                ));
+                out.push_str(span.colour.name());
+                out.push_str(" · ");
+                out.push_str(&hhmm(span.first_ms));
+                if span.first_ms != span.last_ms {
+                    out.push('–');
+                    out.push_str(&hhmm(span.last_ms));
+                }
+                out.push_str("</span>");
             }
             out.push_str("</span>");
         }
@@ -253,7 +265,13 @@ fn push_table(out: &mut String, page: &DayPage<'_>, rows: &[Peer]) {
 
 fn counting_notes() -> String {
     let mut html = String::from("<details>\n<summary>How each column is counted</summary>\n");
-    for rule in [VOTE_CHANGES_RULE, TRAIL_RULE, FETCHES_RULE, ARGUMENTS_RULE] {
+    for rule in [
+        VOTE_CHANGES_RULE,
+        TRAIL_RULE,
+        SPAN_RULE,
+        FETCHES_RULE,
+        ARGUMENTS_RULE,
+    ] {
         html.push_str("<p class=\"mono\">");
         html.push_str(rule);
         html.push_str("</p>\n");
@@ -301,7 +319,7 @@ mod tests {
     use crate::site::support::{self, FORBIDDEN, assert_clean, page, page_named};
     use crate::site::{ArgumentView, Chrome, DayPage, Paint};
     use crate::tally::{
-        ARGUMENTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE, TRAIL_RULE, VOTE_CHANGES_RULE,
+        ARGUMENTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE, SPAN_RULE, TRAIL_RULE, VOTE_CHANGES_RULE,
     };
 
     const MINUTE_MS: u64 = 60_000;
@@ -338,6 +356,7 @@ mod tests {
             crate::closing::LIVE_RULE,
             VOTE_CHANGES_RULE,
             TRAIL_RULE,
+            SPAN_RULE,
             FETCHES_RULE,
             ARGUMENTS_RULE,
         ] {
@@ -484,10 +503,26 @@ mod tests {
         assert_in_order(blue, &["<li>Heron</li>", "<li>Ibis</li>", "<li>Jay</li>"]);
         assert!(green.contains("<li>Kite</li>"));
         assert!(navy.contains("<li>Lark</li>"));
-        assert_eq!(html.matches(&chip(Red)).count(), 7);
-        assert_eq!(html.matches(&chip(Blue)).count(), 3);
-        assert_eq!(html.matches(&chip(Green)).count(), 1);
-        assert_eq!(html.matches(&chip(Navy)).count(), 1);
+        assert_eq!(
+            html.matches(&chip(Red).replace("red</span>", "red · 00:00</span>"))
+                .count(),
+            7
+        );
+        assert_eq!(
+            html.matches(&chip(Blue).replace("blue</span>", "blue · 00:00</span>"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            html.matches(&chip(Green).replace("green</span>", "green · 00:00</span>"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            html.matches(&chip(Navy).replace("navy</span>", "navy · 00:00</span>"))
+                .count(),
+            1
+        );
         assert!(html.contains(&named_peer("Avocet", "r7")));
         assert!(
             html.find(&named_peer("Avocet", "r7")).unwrap()
@@ -554,9 +589,9 @@ mod tests {
         let avocet = row_after(&html, &named_peer("Avocet", "peer-b"));
         let chips = format!(
             "<span class=\"chips\" style=\"gap:4px\">{}{}{}</span>",
-            chip(Blue),
-            chip(Red),
-            chip(Blue)
+            chip(Blue).replace("blue</span>", "blue · 00:10</span>"),
+            chip(Red).replace("red</span>", "red · 00:20</span>"),
+            chip(Blue).replace("blue</span>", "blue · 00:30</span>")
         );
         let chips_at = avocet.find(&chips).expect("blue red blue chips");
         let changes_at = avocet
@@ -601,6 +636,63 @@ mod tests {
         assert_marked_clean(&html);
         assert!(!html.contains("<li><a"));
         assert_eq!(html.matches("<td><a href=\"flock.html\"").count(), 3);
+    }
+
+    #[test]
+    fn first_day_trails_draw_held_spans_without_changing_the_counts() {
+        use crate::colour::Colour::Black;
+        let at = |hour: u64, minute: u64| hour * 3_600_000 + minute * MINUTE_MS;
+        let mut votes = Vec::new();
+        for (author, colour, first, last, count) in [
+            ("corncrake", Blue, at(13, 38), at(13, 39), 2),
+            ("corncrake", Black, at(13, 56), at(14, 49), 43),
+            ("corncrake", Blue, at(14, 50), at(15, 28), 30),
+            ("avocet", Blue, at(13, 38), at(16, 28), 89),
+        ] {
+            for index in 0..count {
+                votes.push(support::vote(
+                    author,
+                    colour,
+                    first + (last - first) * index / (count - 1),
+                ));
+            }
+        }
+        votes.push(support::vote("single", Blue, at(13, 38)));
+        votes.reverse();
+        let arguments = [
+            argument("corncrake", at(13, 41)),
+            argument("avocet", at(14, 37)),
+        ];
+        let evidence = [
+            evidence("corncrake", at(13, 40)),
+            evidence("avocet", at(14, 30)),
+        ];
+        let mut shown = page(&votes, &arguments, &evidence, None, Paint::NoRecord);
+        shown.chrome.as_of_ms = at(16, 30);
+        let html = render_flock(&shown);
+        let row = |id| row_after(&html, &format!("font-size:12px\">{id}</span>"));
+        let corncrake = row("corncrake");
+        assert_eq!(corncrake.matches("class=\"chip\"").count(), 3);
+        let expected = [
+            chip(Blue).replace("blue</span>", "blue · 13:38–13:39</span>"),
+            chip(Black).replace("black</span>", "black · 13:56–14:49</span>"),
+            chip(Blue).replace("blue</span>", "blue · 14:50–15:28</span>"),
+        ];
+        assert_in_order(
+            corncrake,
+            &expected.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        assert!(corncrake.contains("<td class=\"num\">2</td>\n<td class=\"num\">1</td>\n<td class=\"num\">1</td>\n<td class=\"num\">15:28</td>"));
+        let avocet = row("avocet");
+        assert_eq!(avocet.matches("class=\"chip\"").count(), 1);
+        assert!(avocet.contains(&chip(Blue).replace("blue</span>", "blue · 13:38–16:28</span>")));
+        assert!(avocet.contains("<td class=\"num\">0</td>\n<td class=\"num\">1</td>\n<td class=\"num\">1</td>\n<td class=\"num\">16:28</td>"));
+        assert!(row("single").contains(&chip(Blue).replace("blue</span>", "blue · 13:38</span>")));
+        assert_eq!(html.matches(SPAN_RULE).count(), 1);
+        let notes = html.split_once("How each column is counted").unwrap().1;
+        assert!(notes.find(TRAIL_RULE).unwrap() < notes.find(SPAN_RULE).unwrap());
+        assert_rules(&html);
+        assert_marked_clean(&html);
     }
 
     #[test]

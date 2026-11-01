@@ -9,13 +9,15 @@ use crate::colour::Colour;
 use crate::day::{Day, utc_time};
 use crate::evidence::{Evidence, SUNRISE_HOST, WIKIMEDIA_HOST};
 use crate::tally::{
-    ARGUMENTS_RULE, CITATIONS_RULE, COUNTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE,
-    VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations, counts, current_votes, live_votes, trails,
-    vote_changes, votes_cast,
+    ARGUE_LABEL_RULE, ARGUMENTS_RULE, CITATIONS_RULE, COUNTS_RULE, CURRENT_VOTES_RULE,
+    FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations, counts, live_votes, trails,
+    vote_after, vote_changes, votes_cast,
 };
 
 use super::layout::{chip, document, formula, peer, push_escaped};
 use super::{DayPage, Paint, Section};
+
+pub const DECIDED_VOTES_RULE: &str = "Once the day is decided, the votes shown are the live voters' current votes at the moment of decision, the end of the hour that decided it. Votes after that moment are not shown here; the day page lists every record.";
 
 const HOUR_MINUTES: u64 = HOLD_MS / 60_000;
 const FACTS_SHOWN: usize = 12;
@@ -28,13 +30,19 @@ const FACTS_SHOWN: usize = 12;
 pub fn render_front(page: &DayPage<'_>) -> String {
     let now = page.chrome.as_of_ms;
     let open = page.day.open_ms();
-    let live = live_voters(page.votes, open, now);
+    let decision = decide(page.votes, open, now);
+    let decided_at = match decision {
+        Decision::Decided { held_to_ms, .. } => Some(held_to_ms),
+        Decision::Undecided => None,
+    };
+    let moment = decided_at.unwrap_or(now);
+    let live = live_voters(page.votes, open, moment);
     let mut body = String::new();
     push_hero(&mut body, page, live.len());
-    push_right_now(&mut body, page, &live, now, open);
+    push_right_now(&mut body, page, &live, now, open, decision);
     body.push_str("</section>\n");
-    push_current(&mut body, page, now);
-    push_numbers(&mut body, page, live.len(), now, open);
+    push_current(&mut body, page, moment, decided_at);
+    push_numbers(&mut body, page, live.len(), now, open, moment);
     push_activity(&mut body, page, now, open);
     let title = format!("Today {}", page.day);
     document(&title, Some(Section::Today), 0, &page.chrome, &body)
@@ -95,11 +103,18 @@ fn paint_sentence(paint: Paint) -> String {
     }
 }
 
-fn push_right_now(out: &mut String, page: &DayPage<'_>, live: &[String], now: u64, open: u64) {
+fn push_right_now(
+    out: &mut String,
+    page: &DayPage<'_>,
+    live: &[String],
+    now: u64,
+    open: u64,
+    decision: Decision,
+) {
     out.push_str("<section class=\"card hero-card\"><p class=\"mono muted\" style=\"margin:0;font-size:13px\">RIGHT NOW · ");
     out.push_str(&hhmm(now));
     out.push_str(" UTC</p>\n");
-    match decide(page.votes, open, now) {
+    match decision {
         Decision::Decided {
             colour,
             held_from_ms,
@@ -225,7 +240,7 @@ fn push_no_hold(out: &mut String, page: &DayPage<'_>, live: usize, now: u64) {
     out.push_str(" live voters.</p>\n");
 }
 
-fn push_current(out: &mut String, page: &DayPage<'_>, now: u64) {
+fn push_current(out: &mut String, page: &DayPage<'_>, now: u64, decided_at: Option<u64>) {
     let current = live_votes(page.votes, page.day.open_ms(), now);
     let totals = counts(page.votes, page.day.open_ms(), now);
     let mut authors_of: BTreeMap<Colour, Vec<&str>> = BTreeMap::new();
@@ -242,7 +257,16 @@ fn push_current(out: &mut String, page: &DayPage<'_>, now: u64) {
     let mut order: Vec<Colour> = totals.keys().copied().collect();
     order.sort_by(|left, right| totals[right].cmp(&totals[left]).then(left.cmp(right)));
 
-    out.push_str("<section class=\"card\" aria-labelledby=\"votes-h\" style=\"display:flex;flex-direction:column;gap:20px\"><div style=\"display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px\"><h2 id=\"votes-h\" style=\"margin:0\">Current votes</h2>\n<div class=\"chips\">");
+    out.push_str("<section class=\"card\" aria-labelledby=\"votes-h\" style=\"display:flex;flex-direction:column;gap:20px\"><div style=\"display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px\"><h2 id=\"votes-h\" style=\"margin:0\">");
+    match decided_at {
+        Some(at_ms) => {
+            out.push_str("Votes at the decision · ");
+            out.push_str(&hhmm(at_ms));
+            out.push_str(" UTC");
+        }
+        None => out.push_str("Current votes"),
+    }
+    out.push_str("</h2>\n<div class=\"chips\">");
     for colour in &order {
         out.push_str("<span class=\"chip-lg\"><span class=\"swatch-sm\" aria-hidden=\"true\" style=\"background:");
         out.push_str(&hex(*colour));
@@ -274,16 +298,29 @@ fn push_current(out: &mut String, page: &DayPage<'_>, now: u64) {
     push_escaped(out, CURRENT_VOTES_RULE);
     out.push_str("</p><p class=\"mono\">");
     push_escaped(out, COUNTS_RULE);
-    out.push_str("</p></details></section>\n");
+    out.push_str("</p>");
+    if decided_at.is_some() {
+        out.push_str("<p class=\"mono\">");
+        push_escaped(out, DECIDED_VOTES_RULE);
+        out.push_str("</p>");
+    }
+    out.push_str("</details></section>\n");
 }
 
-fn push_numbers(out: &mut String, page: &DayPage<'_>, live: usize, now: u64, open: u64) {
+fn push_numbers(
+    out: &mut String,
+    page: &DayPage<'_>,
+    live: usize,
+    now: u64,
+    open: u64,
+    live_at: u64,
+) {
     let changes: usize = vote_changes(page.votes).values().sum();
     out.push_str("<section class=\"numbers\" aria-label=\"Today in numbers\">\n");
     push_stat(
         out,
         live,
-        &format!("live voters at {}", hhmm(now)),
+        &format!("live voters at {}", hhmm(live_at)),
         LIVE_RULE,
     );
     push_stat(
@@ -309,7 +346,9 @@ fn push_stat(out: &mut String, number: usize, label: &str, rule: &str) {
 }
 
 fn push_activity(out: &mut String, page: &DayPage<'_>, now: u64, open: u64) {
-    out.push_str("<div class=\"split\">\n<section class=\"card main\" aria-labelledby=\"day-h\"><h2 id=\"day-h\">The day so far</h2>\n<p class=\"muted\" style=\"font-size:15px\">Arguments and vote changes, newest first. Every message is the peer’s own words, quoted as data.</p><ol class=\"timeline\">\n");
+    out.push_str("<div class=\"split\">\n<section class=\"card main\" aria-labelledby=\"day-h\"><h2 id=\"day-h\">The day so far</h2>\n<p class=\"muted\" style=\"font-size:15px\">Arguments and vote changes, newest first. Every message is the peer’s own words, quoted as data.</p>");
+    out.push_str(&formula(ARGUE_LABEL_RULE));
+    out.push_str("<ol class=\"timeline\">\n");
     for event in timeline(page, now, open) {
         match event {
             Event::Argument {
@@ -353,14 +392,16 @@ fn push_argument(
     text: &str,
     cites: &[Evidence],
 ) {
-    let current = current_votes(page.votes, at_ms);
-    push_event_start(out, at_ms, current.get(author).copied());
+    let colour = vote_after(page.votes, author, at_ms);
+    push_event_start(out, at_ms, colour);
     out.push_str("<div><strong>");
     out.push_str(&peer(&page.chrome, author));
-    out.push_str("</strong> <span class=\"muted\">argued, voting</span> ");
-    match current.get(author) {
-        Some(colour) => out.push_str(&chip(*colour)),
-        None => out.push_str("no vote yet"),
+    match colour {
+        Some(colour) => {
+            out.push_str("</strong> <span class=\"muted\">argued, then voted</span> ");
+            out.push_str(&chip(colour));
+        }
+        None => out.push_str("</strong> <span class=\"muted\">argued, not voted yet</span>"),
     }
     out.push_str("</div><blockquote>\u{201C}");
     push_escaped(out, text);
@@ -921,6 +962,155 @@ mod tests {
         let empty = render_front(&page(&[], &[], &[], None, Paint::NoRecord));
         assert!(empty.contains("No votes yet today."));
         assert_clean(&empty);
+    }
+
+    #[test]
+    fn decided_votes_freeze_the_live_set_but_keep_whole_day_activity() {
+        let mut votes = Vec::new();
+        for author in ["a", "b", "c"] {
+            votes.push(vote(author, Blue, at(14, 0)));
+            votes.push(vote(author, Blue, at(14, 40)));
+        }
+        votes.push(vote("d", Red, at(15, 30)));
+        let arguments = [argument("late", "d", at(15, 20), "later claim", Vec::new())];
+        let records = [sourced(
+            "d",
+            "https://example.com/fact",
+            at(15, 10),
+            "later fact",
+        )];
+        let names = BTreeMap::new();
+        let shown = page_at(
+            &votes,
+            &arguments,
+            &records,
+            Paint::NoRecord,
+            at(16, 0),
+            &names,
+        );
+        let html = render_front(&shown);
+        assert!(html.contains("Decided: "));
+        assert!(html.contains("held 14:00–15:00 UTC"));
+        assert!(html.contains("3 small models are choosing tomorrow’s colour."));
+        let current = html
+            .split_once("aria-labelledby=\"votes-h\"")
+            .unwrap()
+            .1
+            .split_once("</section>")
+            .unwrap()
+            .0;
+        assert!(current.contains(
+            "<h2 id=\"votes-h\" style=\"margin:0\">Votes at the decision · 15:00 UTC</h2>"
+        ));
+        assert_eq!(current.matches("<li class=\"tile\">").count(), 3);
+        for author in ["a", "b", "c"] {
+            assert!(current.contains(&format!("class=\"id mono\">{author}</span>")));
+        }
+        assert!(!current.contains("class=\"id mono\">d</span>"));
+        assert!(current.contains("blue 3"));
+        assert!(!current.contains("></span>red "));
+        let rule = super::DECIDED_VOTES_RULE.replace("'", "&#39;");
+        assert_eq!(current.matches(&rule).count(), 1);
+        assert!(
+            current
+                .find(&super::COUNTS_RULE.replace("'", "&#39;"))
+                .unwrap()
+                < current.find(&rule).unwrap()
+        );
+        assert_beside(
+            &html,
+            "3</span><span class=\"label\">live voters at 15:00</span>",
+            "The live voters at a time",
+        );
+        for (count, label) in [
+            (7, "votes cast"),
+            (0, "vote changes"),
+            (1, "fetches"),
+            (1, "arguments"),
+        ] {
+            assert!(html.contains(&format!(
+                "{count}</span><span class=\"label\">{label}</span>"
+            )));
+        }
+        assert!(html.contains("later claim"));
+        assert!(html.contains("later fact"));
+        assert_prohibitions(&html);
+
+        // At 14:50 the day is still undecided and d's earlier vote is live.
+        votes.last_mut().unwrap().at_ms = at(14, 45);
+        let html = render_front(&page_at(
+            &votes,
+            &[],
+            &[],
+            Paint::NoRecord,
+            at(14, 50),
+            &names,
+        ));
+        let current = html
+            .split_once("aria-labelledby=\"votes-h\"")
+            .unwrap()
+            .1
+            .split_once("</section>")
+            .unwrap()
+            .0;
+        assert!(current.contains(">Current votes</h2>"));
+        assert!(current.contains("blue 3"));
+        assert!(current.contains("red 1"));
+        assert!(current.contains("class=\"id mono\">d</span>"));
+        assert!(!html.contains("Votes at the decision"));
+        assert!(!html.contains(&rule));
+        assert_prohibitions(&html);
+
+        let empty = render_front(&page(&[], &[], &[], None, Paint::NoRecord));
+        assert!(empty.contains(">Current votes</h2>"));
+        assert!(empty.contains("No votes yet today."));
+        assert!(!empty.contains(&rule));
+        assert_clean(&empty);
+    }
+
+    #[test]
+    fn arguments_show_the_following_vote_and_publish_the_label_rule() {
+        let votes = [
+            vote("corncrake", Blue, at(13, 38)),
+            vote("corncrake", Black, at(13, 56)),
+        ];
+        let arguments = [
+            argument("first", "corncrake", at(13, 41), "black claim", Vec::new()),
+            argument("last", "corncrake", at(14, 0), "unvoted claim", Vec::new()),
+        ];
+        let names = BTreeMap::new();
+        let html = render_front(&page_at(
+            &votes,
+            &arguments,
+            &[],
+            Paint::NoRecord,
+            at(14, 1),
+            &names,
+        ));
+        let activity = html.split_once("aria-labelledby=\"day-h\"").unwrap().1;
+        let activity = activity.split_once("</section>").unwrap().0;
+        let following = activity
+            .split("<li>")
+            .find(|item| item.contains("black claim"))
+            .unwrap();
+        assert!(following.contains(&format!("argued, then voted</span> {}", super::chip(Black))));
+        assert!(following.contains("class=\"dot\" style=\"background:#000000\""));
+        let unvoted = activity
+            .split("<li>")
+            .find(|item| item.contains("unvoted claim"))
+            .unwrap();
+        assert!(unvoted.contains("argued, not voted yet</span>"));
+        assert!(unvoted.contains("class=\"dot\" style=\"background:var(--chip)\""));
+        let rule = super::formula(super::ARGUE_LABEL_RULE);
+        assert_eq!(html.matches(&rule).count(), 1);
+        assert!(
+            activity
+                .find("Arguments and vote changes, newest first.")
+                .unwrap()
+                < activity.find(&rule).unwrap()
+        );
+        assert!(activity.find(&rule).unwrap() < activity.find("<ol class=\"timeline\">").unwrap());
+        assert_prohibitions(&html);
     }
 
     #[test]
