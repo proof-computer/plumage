@@ -6,7 +6,7 @@ use crate::actions::{ARGUMENT_CHARS, FETCHES_PER_ACTIVATION, MAX_CITATIONS};
 use crate::closing::{HOLD_MS, HOLDING_RULE, LIVE_RULE, RULE};
 use crate::colour::Colour;
 use crate::day::CLOSE_AFTER_MS;
-use crate::evidence::{EXCERPT_CHARS, SUNRISE_HOST, WIKIMEDIA_HOST};
+use crate::evidence::{EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
 use crate::tally::{CURRENT_VOTES_RULE, VOTE_CHANGES_RULE};
 
 use super::layout::{document, push_escaped};
@@ -126,16 +126,14 @@ fn push_actions(out: &mut String) {
     push_action(
         out,
         "fetch",
-        "Read a fact about today from one of two sources.",
+        "Read one of today’s five lists from Wikipedia’s “On this day” feed.",
         &[
-            format!(
-                "Wikipedia\u{2019}s \u{201c}On this day\u{201d} feed (<code>{WIKIMEDIA_HOST}</code>), \
-                 or London\u{2019}s sunrise and sunset (<code>{SUNRISE_HOST}</code>)"
-            ),
+            format!("<code>{WIKIMEDIA_HOST}</code>: {}", LISTS.join(", ")),
             format!("{FETCHES_PER_ACTIVATION} fetches per activation"),
-            "Each peer starts at a different event, set by a hash of its id".to_owned(),
+            "Each peer starts at a different entry of each list, set by a hash of its id"
+                .to_owned(),
             format!(
-                "Stored as evidence: URL, time, SHA-256 digest, at most {EXCERPT_CHARS} characters"
+                "Stored as evidence: URL, time, SHA-256 digest, whole lines up to {EXCERPT_CHARS} characters"
             ),
         ],
     );
@@ -293,7 +291,7 @@ mod tests {
     use crate::closing::{HOLD_MS, HOLDING_RULE, LIVE_RULE, RULE};
     use crate::colour::Colour;
     use crate::day::CLOSE_AFTER_MS;
-    use crate::evidence::{EXCERPT_CHARS, SUNRISE_HOST, WIKIMEDIA_HOST};
+    use crate::evidence::{EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
     use crate::site::support::assert_clean;
     use crate::site::{Chrome, Paint};
     use crate::tally::{CURRENT_VOTES_RULE, VOTE_CHANGES_RULE};
@@ -325,11 +323,21 @@ mod tests {
         assert!(html.contains(&format!("{FETCHES_PER_ACTIVATION} fetches per activation")));
         assert!(html.contains(&format!("At most {ARGUMENT_CHARS} characters")));
         assert!(html.contains(&format!("up to {MAX_CITATIONS} pieces of evidence")));
-        assert!(html.contains(&format!("at most {EXCERPT_CHARS} characters")));
+        assert!(html.contains(&format!("Stored as evidence: URL, time, SHA-256 digest, whole lines up to {EXCERPT_CHARS} characters")));
         assert!(html.contains(&format!("<code>{WIKIMEDIA_HOST}</code>")));
-        assert!(html.contains(&format!("<code>{SUNRISE_HOST}</code>")));
-        assert!(html.contains("Wikipedia\u{2019}s \u{201c}On this day\u{201d} feed"));
-        assert!(html.contains("London\u{2019}s sunrise and sunset"));
+        assert!(
+            html.contains("Read one of today’s five lists from Wikipedia’s “On this day” feed.")
+        );
+        assert!(html.contains(&format!(
+            "<code>{WIKIMEDIA_HOST}</code>: {}",
+            LISTS.join(", ")
+        )));
+        assert!(html.contains(
+            "Each peer starts at a different entry of each list, set by a hash of its id"
+        ));
+        for absent in ["sunrise", "sunset", "two sources"] {
+            assert!(!html.contains(absent), "{absent}");
+        }
         assert!(html.contains(&format!("Exactly one of the {} names", Colour::ALL.len())));
         assert!(html.contains(&format!("The {} colours", Colour::ALL.len())));
         assert!(html.contains(&format!("flex:{close_hours}")));

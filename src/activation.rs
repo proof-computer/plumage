@@ -341,8 +341,8 @@ mod tests {
         br#"{"events":[{"year":1903,"text":"A fixed fact about the day"},{"year":1912,"text":"A second fixed fact"},{"year":1955,"text":"A third fixed fact"}]}"#.to_vec()
     }
 
-    fn sunrise_body() -> Vec<u8> {
-        br#"{"status":"OK","results":{"sunrise":"2026-10-26T06:40:00+00:00","sunset":"2026-10-26T16:35:00+00:00"}}"#.to_vec()
+    fn births_body() -> Vec<u8> {
+        br#"{"births":[{"year":1903,"text":"A fixed birth on this day"}]}"#.to_vec()
     }
 
     struct FixedSource {
@@ -356,9 +356,9 @@ mod tests {
         ) -> impl Future<Output = std::result::Result<Vec<u8>, FetchError>> + Send {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let url = url.clone();
-            let body = match url.host_str() {
-                Some(crate::evidence::WIKIMEDIA_HOST) => wiki_body(),
-                Some(crate::evidence::SUNRISE_HOST) => sunrise_body(),
+            let body = match crate::evidence::Allowlist::list(&url) {
+                Some("events") => wiki_body(),
+                Some("births") => births_body(),
                 _ => Vec::new(),
             };
             async move {
@@ -374,13 +374,13 @@ mod tests {
         }
     }
 
-    /// Allowlisted sunrise fails in the source; the wiki host still succeeds.
+    /// Allowlisted births fail in the source; the events list still succeeds.
     /// `actions::validate` never sees this `not_allowed`: the URL is permitted.
-    struct SunriseRefused {
+    struct BirthsRefused {
         calls: Arc<AtomicUsize>,
     }
 
-    impl Source for SunriseRefused {
+    impl Source for BirthsRefused {
         fn get(
             &self,
             url: &Url,
@@ -388,12 +388,12 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let url = url.clone();
             async move {
-                if url.host_str() == Some(crate::evidence::SUNRISE_HOST) {
+                if crate::evidence::Allowlist::list(&url) == Some("births") {
                     Err(FetchError {
                         code: "not_allowed",
                         message: format!("refused {url}"),
                     })
-                } else if url.host_str() == Some(crate::evidence::WIKIMEDIA_HOST) {
+                } else if crate::evidence::Allowlist::list(&url) == Some("events") {
                     Ok(wiki_body())
                 } else {
                     Err(FetchError {
@@ -416,7 +416,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Script {
         FetchWiki,
-        FetchSunrise,
+        FetchBirths,
         ArgueLastEvidence,
         ArgueUnknown,
         ArgueReply,
@@ -476,7 +476,7 @@ mod tests {
         let step = fake.script.lock().unwrap().pop_front();
         let action = match step {
             Some(Script::FetchWiki) => json!({"action": "fetch", "url": fake.wiki_url}),
-            Some(Script::FetchSunrise) => {
+            Some(Script::FetchBirths) => {
                 json!({"action": "fetch", "url": fetch::sources(&day())[1].to_string()})
             }
             Some(Script::ArgueLastEvidence) => {
@@ -1035,10 +1035,8 @@ mod tests {
         assert_eq!(prompts[0].1["you"], "p00");
         assert_eq!(prompts[1].1["you"], "p01");
         assert_eq!(prompts[0].1["date"], "2026-10-26");
-        assert_eq!(prompts[0].1["sources"].as_array().unwrap().len(), 2);
-        let sources = fetch::sources(&day());
-        assert_eq!(prompts[0].1["sources"][0], sources[0].as_str());
-        assert_eq!(prompts[0].1["sources"][1], sources[1].as_str());
+        let sources = fetch::sources(&day()).map(|url| url.to_string());
+        assert_eq!(prompts[0].1["sources"], json!(sources));
         assert!(prompts[0].2.contains("ARGUMENT-P01-VISIBLE"));
         assert!(!prompts[0].0.contains("ARGUMENT-P01-VISIBLE"));
         assert!(!prompts[0].2.contains("EXCERPT-ONLY-P01-SHOULD-NOT-LEAK"));
@@ -1049,11 +1047,11 @@ mod tests {
     async fn refused_allowlisted_fetch_is_counted_and_the_vote_still_lands() {
         let dir = tempfile::tempdir().unwrap();
         let book = open_book(dir.path(), "p00.redb", "p00").await;
-        let source = SunriseRefused {
+        let source = BirthsRefused {
             calls: Arc::new(AtomicUsize::new(0)),
         };
         let server = fake(vec![
-            Script::FetchSunrise,
+            Script::FetchBirths,
             Script::FetchWiki,
             Script::ArgueLastEvidence,
             Script::VoteBlue,
@@ -1079,7 +1077,7 @@ mod tests {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("not_allowed", 1);
         assert_eq!(failure_counts(&failures), expected);
-        assert_eq!(failures[0].host, crate::evidence::SUNRISE_HOST);
+        assert_eq!(failures[0].host, crate::evidence::WIKIMEDIA_HOST);
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
         assert_eq!(book.index().evidence.len(), 1);
         let requests = server.requests.lock().unwrap().clone();

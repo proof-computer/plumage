@@ -1,4 +1,4 @@
-//! The one place plumage touches the outside web: two allowlisted JSON sources,
+//! The one place plumage touches the outside web: five allowlisted lists on one host,
 //! read into bounded evidence. Fetched text stays data.
 
 use std::{fmt, future::Future, path::PathBuf, time::Duration};
@@ -9,7 +9,7 @@ use url::Url;
 use crate::{
     actions::seed_offset,
     day::Day,
-    evidence::{Allowlist, Evidence, SUNRISE_HOST, WIKIMEDIA_HOST},
+    evidence::{Allowlist, Evidence, LISTS, WIKIMEDIA_HOST},
 };
 
 /// Refuse a response body larger than this, counted while it is read.
@@ -22,28 +22,12 @@ pub const USER_AGENT: &str = concat!(
     " (+https://github.com/proof-computer/plumage)"
 );
 
-const SUNRISE_FIELDS: [&str; 10] = [
-    "sunrise",
-    "sunset",
-    "solar_noon",
-    "day_length",
-    "civil_twilight_begin",
-    "civil_twilight_end",
-    "nautical_twilight_begin",
-    "nautical_twilight_end",
-    "astronomical_twilight_begin",
-    "astronomical_twilight_end",
-];
-
-/// The two owner-approved URLs for `day`, both shapes [`Allowlist::permits`].
-pub fn sources(day: &Day) -> [Url; 2] {
+/// The five owner-approved URLs for `day`, all shapes [`Allowlist::permits`].
+pub fn sources(day: &Day) -> [Url; 5] {
     let (month, day_of_month) = day.month_day();
-    let wikimedia = format!(
-        "https://{WIKIMEDIA_HOST}/feed/v1/wikipedia/en/onthisday/all/{month:02}/{day_of_month:02}"
-    );
-    let sunrise =
-        format!("https://{SUNRISE_HOST}/json?lat=51.5074&lng=-0.1278&date={day}&formatted=0");
-    [parse_source(&wikimedia), parse_source(&sunrise)]
+    LISTS.map(|list| parse_source(&format!(
+        "https://{WIKIMEDIA_HOST}/feed/v1/wikipedia/en/onthisday/{list}/{month:02}/{day_of_month:02}"
+    )))
 }
 
 fn parse_source(url: &str) -> Url {
@@ -103,7 +87,7 @@ impl Source for FixtureSource {
     }
 }
 
-/// HTTPS client for the two allowlisted hosts. Redirects and proxies are off.
+/// HTTPS client for five allowlisted lists on one host. Redirects and proxies are off.
 #[derive(Clone, Debug)]
 pub struct HttpSource {
     client: reqwest::Client,
@@ -172,24 +156,27 @@ async fn read_limited(client: &reqwest::Client, url: &Url) -> Result<Vec<u8>, Fe
 /// Text fields of one response, and nothing else.
 ///
 /// `prior` is how many times `author` already fetched this URL in the run.
-/// Wikimedia walks the kept event list from `seed_offset(author, len) + prior`.
-/// Sunrise ignores `prior`.
+/// Each list walks its kept entries from `seed_offset(author, len) + prior`.
 pub fn extract(url: &Url, body: &[u8], author: &str, prior: usize) -> Result<String, FetchError> {
     if !Allowlist::permits(url) {
         return Err(failure("source_invalid", format!("refused {url}")));
     }
     let value: Value = serde_json::from_slice(body)
         .map_err(|_| failure("source_invalid", "response is not JSON"))?;
-    match url.host_str() {
-        Some(WIKIMEDIA_HOST) => extract_wikimedia(&value, author, prior),
-        Some(SUNRISE_HOST) => extract_sunrise(&value),
+    match Allowlist::list(url) {
+        Some(list) => extract_list(&value, list, author, prior),
         _ => Err(failure("source_invalid", format!("refused {url}"))),
     }
 }
 
-fn extract_wikimedia(value: &Value, author: &str, prior: usize) -> Result<String, FetchError> {
-    let Some(events) = value.get("events").and_then(Value::as_array) else {
-        return Err(failure("source_invalid", "events is not an array"));
+fn extract_list(
+    value: &Value,
+    list: &str,
+    author: &str,
+    prior: usize,
+) -> Result<String, FetchError> {
+    let Some(events) = value.get(list).and_then(Value::as_array) else {
+        return Err(failure("source_invalid", format!("{list} is not an array")));
     };
     let mut kept = Vec::new();
     for event in events {
@@ -205,7 +192,10 @@ fn extract_wikimedia(value: &Value, author: &str, prior: usize) -> Result<String
     }
     let len = kept.len();
     if len == 0 {
-        return Err(failure("source_invalid", "events contain no text"));
+        return Err(failure(
+            "source_invalid",
+            format!("{list} contains no text"),
+        ));
     }
     // Q-20261023-7xbm: the first fetch starts at sha256(author) mod len.
     // `as u128` is lossless: a `usize` is never wider than `u128`.
@@ -216,37 +206,6 @@ fn extract_wikimedia(value: &Value, author: &str, prior: usize) -> Result<String
         lines.push(kept[(start + index) % len].as_str());
     }
     Ok(lines.join("\n"))
-}
-
-fn extract_sunrise(value: &Value) -> Result<String, FetchError> {
-    if value.get("status").and_then(Value::as_str) != Some("OK") {
-        return Err(failure("source_invalid", "sunrise status is not OK"));
-    }
-    let Some(results) = value.get("results").and_then(Value::as_object) else {
-        return Err(failure(
-            "source_invalid",
-            "sunrise results are not an object",
-        ));
-    };
-    let mut lines = Vec::new();
-    for key in SUNRISE_FIELDS {
-        let Some(field) = results.get(key) else {
-            continue;
-        };
-        let Some(text) = scalar_text(field) else {
-            continue;
-        };
-        lines.push(format!("{key}: {text}"));
-    }
-    Ok(lines.join("\n"))
-}
-
-fn scalar_text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    }
 }
 
 /// Allowlist, then `get`, then [`extract`], then [`Evidence::new`].
@@ -304,23 +263,21 @@ mod tests {
     }
 
     #[test]
-    fn sources_for_a_real_day_are_permitted() {
-        let urls = sources(&day("2026-10-26"));
-        assert_eq!(
-            urls[0].as_str(),
-            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/10/26"
-        );
-        assert_eq!(
-            urls[1].as_str(),
-            "https://api.sunrise-sunset.org/json?lat=51.5074&lng=-0.1278&date=2026-10-26&formatted=0"
-        );
-        assert!(Allowlist::permits(&urls[0]));
-        assert!(Allowlist::permits(&urls[1]));
+    fn sources_for_a_real_day_are_the_five_permitted_lists_in_order() {
+        for (date, suffix) in [("2026-10-26", "10/26"), ("2028-02-29", "02/29")] {
+            let urls = sources(&day(date));
+            assert_eq!(urls.len(), 5);
+            for (url, list) in urls.iter().zip(LISTS) {
+                assert_eq!(
+                    url.as_str(),
+                    format!(
+                        "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/{list}/{suffix}"
+                    )
+                );
+                assert!(Allowlist::permits(url));
+            }
+        }
         assert!("2026-02-29".parse::<Day>().is_err());
-        let leap = day("2028-02-29");
-        assert_eq!(leap.next().to_string(), "2028-03-01");
-        assert!(Allowlist::permits(&sources(&leap)[0]));
-        assert!(Allowlist::permits(&sources(&leap)[1]));
     }
 
     #[test]
@@ -368,44 +325,60 @@ mod tests {
     }
 
     #[test]
-    fn sunrise_lines_follow_the_field_order() {
-        let url = &sources(&day("2026-10-26"))[1];
-        let body = br#"{
-            "status": "OK",
-            "results": {
-                "day_length": 36000,
-                "sunset": "2026-10-26T16:35:00+00:00",
-                "sunrise": "2026-10-26T06:35:00+00:00",
-                "solar_noon": "2026-10-26T11:35:00+00:00",
-                "civil_twilight_end": "2026-10-26T17:10:00+00:00",
-                "civil_twilight_begin": "2026-10-26T06:00:00+00:00",
-                "nautical_twilight_begin": "2026-10-26T05:20:00+00:00",
-                "nautical_twilight_end": "2026-10-26T17:50:00+00:00",
-                "astronomical_twilight_begin": "2026-10-26T04:40:00+00:00",
-                "astronomical_twilight_end": "2026-10-26T18:30:00+00:00",
-                "ignored": true
+    fn every_list_extracts_text_rotates_independently_and_rejects_invalid_shapes() {
+        for (url, list) in sources(&day("2026-10-26")).iter().zip(LISTS) {
+            let entries = serde_json::json!([
+                {"year":1901,"text":"one"}, {"text":"two"},
+                {"year":1903,"text":5}, {"year":"1904","text":"four"},
+                {"year":1905,"text":"five"}, {"year":1906,"text":"six"},
+                {"year":1.5,"text":"fractional"}
+            ]);
+            let body = serde_json::to_vec(&serde_json::json!({list:entries})).unwrap();
+            let kept = [
+                "1901: one",
+                "two",
+                "four",
+                "1905: five",
+                "1906: six",
+                "fractional",
+            ];
+            for prior in [0, 1, usize::MAX] {
+                let text = extract(url, &body, "a", prior).unwrap();
+                let start = ((seed_offset("a", kept.len()) as u128 + prior as u128)
+                    % kept.len() as u128) as usize;
+                assert_eq!(
+                    text,
+                    (0..kept.len())
+                        .map(|i| kept[(start + i) % kept.len()])
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
             }
-        }"#;
-        let text = extract(url, body, "a", 4).unwrap();
-        assert_eq!(text, extract(url, body, "a", 0).unwrap());
+            let other = if list == "events" { "births" } else { "events" };
+            for invalid in [
+                serde_json::json!({other:entries}),
+                serde_json::json!({list:[]}),
+                serde_json::json!({list:[{"text":1}]}),
+                serde_json::json!({list:{}}),
+            ] {
+                assert_eq!(
+                    extract(url, &serde_json::to_vec(&invalid).unwrap(), "a", 0)
+                        .unwrap_err()
+                        .code,
+                    "source_invalid"
+                );
+            }
+        }
+        let url = &sources(&day("2026-10-26"))[1];
+        let body = serde_json::to_vec(&serde_json::json!({"births": (0..6).map(|i| serde_json::json!({"text":i.to_string()})).collect::<Vec<_>>()})).unwrap();
         assert_eq!(
-            text,
-            "\
-sunrise: 2026-10-26T06:35:00+00:00
-sunset: 2026-10-26T16:35:00+00:00
-solar_noon: 2026-10-26T11:35:00+00:00
-day_length: 36000
-civil_twilight_begin: 2026-10-26T06:00:00+00:00
-civil_twilight_end: 2026-10-26T17:10:00+00:00
-nautical_twilight_begin: 2026-10-26T05:20:00+00:00
-nautical_twilight_end: 2026-10-26T17:50:00+00:00
-astronomical_twilight_begin: 2026-10-26T04:40:00+00:00
-astronomical_twilight_end: 2026-10-26T18:30:00+00:00"
+            extract(url, &body, "a", 0).unwrap().lines().next().unwrap(),
+            seed_offset("a", 6).to_string()
         );
-        let invalid = br#"{"status":"INVALID_DATE","results":{"sunrise":"x"}}"#;
+        let url = &sources(&day("2026-10-26"))[3];
         assert_eq!(
-            extract(url, invalid, "a", 0).unwrap_err().code,
-            "source_invalid"
+            extract(url, br#"{"holidays":[{"text":"A holiday"}]}"#, "a", 0).unwrap(),
+            "A holiday"
         );
     }
 
@@ -418,7 +391,12 @@ astronomical_twilight_end: 2026-10-26T18:30:00+00:00"
         let source = FixtureSource::new(dir.path());
         let urls = sources(&day("2026-10-26"));
         assert_eq!(source.get(&urls[0]).await.unwrap(), body);
-        assert_eq!(source.get(&urls[1]).await.unwrap_err().code, "fetch_failed");
+        for url in &urls {
+            assert_eq!(source.get(url).await.unwrap(), body);
+        }
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(source.get(&urls[0]).await.unwrap_err().code, "fetch_failed");
+        std::fs::write(&file, body).unwrap();
         // A directory path that is a file cannot be read as a fixture directory.
         // A refused URL must still fail at the allowlist before any file read.
         let unreadable = FixtureSource::new(file);
@@ -435,18 +413,29 @@ astronomical_twilight_end: 2026-10-26T18:30:00+00:00"
 
     #[tokio::test]
     async fn fetch_refuses_unlisted_urls_without_calling_the_source() {
-        let url = Url::parse("https://example.com/").unwrap();
         let source = CountingSource {
             body: Vec::new(),
             calls: AtomicUsize::new(0),
         };
-        let error = fetch(&source, &url, "a", "run", 0, 0).await.unwrap_err();
-        assert_eq!(error.code, "not_allowed");
+        for text in [
+            "https://example.com/",
+            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/10/26",
+            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26?x=1",
+        ] {
+            let url = Url::parse(text).unwrap();
+            assert_eq!(
+                fetch(&source, &url, "a", "run", 0, 0)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "not_allowed"
+            );
+            assert_eq!(
+                extract(&url, b"{}", "a", 0).unwrap_err().code,
+                "source_invalid"
+            );
+        }
         assert_eq!(source.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            extract(&url, b"{}", "a", 0).unwrap_err().code,
-            "source_invalid"
-        );
     }
 
     #[tokio::test]
@@ -471,6 +460,7 @@ astronomical_twilight_end: 2026-10-26T18:30:00+00:00"
             format!("{:x}", Sha256::digest(text.as_bytes()))
         );
         assert_eq!(record.excerpt().chars().count(), 600);
+        assert!(record.excerpt().ends_with('…'));
         assert_ne!(
             record.sha256(),
             format!("{:x}", Sha256::digest(record.excerpt().as_bytes()))

@@ -315,7 +315,7 @@ mod tests {
     }
 
     fn wiki() -> Url {
-        Url::parse("https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/10/26").unwrap()
+        Url::parse("https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26").unwrap()
     }
 
     fn evidence_for(author: &str) -> Evidence {

@@ -32,16 +32,18 @@ The closed vocabulary of 24 colours and the stable-majority closing rule are
 implemented and tested as pure code: the first colour held by more than half
 of the live voters for a continuous hour decides the day; otherwise it remains
 undecided. The three actions (`fetch`, `argue`, `vote`) have a closed JSON
-schema and validation. Fetch intents permit only the Wikimedia on-this-day
-feed and London's sunrise/sunset JSON API, with three fetches per activation.
+schema and validation. Fetch intents permit only Wikipedia's On this day lists
+for the date (events, births, deaths, holidays, selected), with three fetches
+per activation.
 Evidence retains a SHA-256 digest and at most 600 characters; arguments are
 limited to 400 characters and eight citations fetched by their author in the
 same run. An argument may also name one other author's argument it answers.
 Records and the citation rule are enforced on the store: a fetch is
 stored as evidence, and an argument is written or imported only when its
 citations pass that rule and, when it names one, the argument it answers. Peer-id SHA-256 hashes seed the initial event
-offset. The fetch executor exists for the two sources and stores bounded
-evidence. The site renders from votes, arguments and evidence as exact counts
+offset. The fetch executor reads the five lists and stores bounded
+evidence, whole lines up to 600 characters. The site renders from votes,
+arguments and evidence as exact counts
 with the published formulas. Every page shares one shell: the decided colour is the page ground,
 Bricolage Grotesque and IBM Plex Mono are served beside the pages, and the
 masthead, 24-colour band, white cards and freshness footer are the same on
@@ -122,7 +124,7 @@ descriptor `deployment.json` points `peer_config` at that file and reserves
 ports 8840 and 8841. Packaging that descriptor is the release path below.
 
 The lab's day starts at the open of `--day` when launched and runs
-`24 h / speed` of wall time. Peers fetch the two allowlisted sources over the
+`24 h / speed` of wall time. Peers fetch the five allowlisted lists over the
 internet. Every page shows its records' freshness.
 
 ## Rules the swarm keeps
