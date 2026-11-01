@@ -41,6 +41,7 @@ pub struct LabConfig {
     pub speed: u64,
     pub activation_interval_ms: Option<u64>,
     pub sync_interval_ms: Option<u64>,
+    pub fixture_source: Option<PathBuf>,
 }
 
 /// One peer's decision for one day, read from `site/days/<D>.json`.
@@ -93,10 +94,12 @@ pub fn parse(args: &[String]) -> Result<LabConfig> {
     let mut speed = 1u64;
     let mut activation_interval_ms = None;
     let mut sync_interval_ms = None;
+    let mut fixture_source = None;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
         match flag.as_str() {
             "--dir" => dir = Some(PathBuf::from(value(&mut rest, flag)?)),
+            "--fixture-source" => fixture_source = Some(PathBuf::from(value(&mut rest, flag)?)),
             "--peers" => {
                 peers = usize::try_from(bounded(
                     value(&mut rest, flag)?,
@@ -162,6 +165,7 @@ pub fn parse(args: &[String]) -> Result<LabConfig> {
         speed,
         activation_interval_ms,
         sync_interval_ms,
+        fixture_source,
     })
 }
 
@@ -185,7 +189,7 @@ pub async fn run(config: LabConfig, mut shutdown: watch::Receiver<bool>) -> Resu
     let last = shift_days(config.first_day, config.days - 1);
     write_peer_configs(&config, &names, &token, clock, last)?;
     write_lab_file(&config, &names, clock.real_start_ms)?;
-    let mut children = spawn_peers(&config.dir, &names)?;
+    let mut children = spawn_peers(&config, &names)?;
     wait_all(&mut children, &mut shutdown).await?;
     collect(&config, &names, &children)
 }
@@ -337,12 +341,12 @@ struct Running {
     status: Option<std::process::ExitStatus>,
 }
 
-fn spawn_peers(dir: &Path, names: &[String]) -> Result<Vec<Running>> {
+fn spawn_peers(config: &LabConfig, names: &[String]) -> Result<Vec<Running>> {
     let exe = std::env::current_exe()
         .map_err(|error| Error::new("peer_failed", format!("plumage binary: {error}")))?;
     let mut running = Vec::with_capacity(names.len());
     for name in names {
-        let peer_dir = dir.join(name);
+        let peer_dir = config.dir.join(name);
         let log_path = peer_dir.join("peer.log");
         let log = OpenOptions::new()
             .create(true)
@@ -360,9 +364,12 @@ fn spawn_peers(dir: &Path, names: &[String]) -> Result<Vec<Running>> {
                 format!("{name} log {}: {error}", log_path.display()),
             )
         })?;
-        let child = Command::new(&exe)
-            .arg("peer")
-            .arg(peer_dir.join("config.json"))
+        let mut command = Command::new(&exe);
+        command.arg("peer").arg(peer_dir.join("config.json"));
+        if let Some(dir) = &config.fixture_source {
+            command.arg("--fixture-source").arg(dir);
+        }
+        let child = command
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr))
             .kill_on_drop(true)

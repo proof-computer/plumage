@@ -82,6 +82,45 @@ pub fn schema_for(day: &Day) -> Value {
     schema
 }
 
+/// Whether this peer has read and argued in the day's ledger.
+pub struct VoteGate {
+    pub fetched: bool,
+    pub argued: bool,
+}
+
+impl VoteGate {
+    pub fn may_vote(&self) -> bool {
+        self.fetched && self.argued
+    }
+}
+
+pub fn vote_gate(index: &DayIndex, author: &str, run: &str) -> VoteGate {
+    VoteGate {
+        fetched: index
+            .evidence
+            .values()
+            .any(|(_, evidence)| evidence.author() == author && evidence.run() == run),
+        argued: index
+            .arguments
+            .iter()
+            .any(|argument| argument.author == author),
+    }
+}
+
+/// Withhold the vote choice until the peer has read and argued.
+pub fn schema_allowing(day: &Day, may_vote: bool) -> Value {
+    let mut schema = schema_for(day);
+    if !may_vote && let Some(choices) = schema.get_mut("oneOf").and_then(Value::as_array_mut) {
+        choices.retain(|choice| {
+            choice
+                .pointer("/properties/action/const")
+                .and_then(Value::as_str)
+                != Some("vote")
+        });
+    }
+    schema
+}
+
 fn own_evidence(peer_id: &str, index: &DayIndex) -> Vec<Value> {
     let mut evidence = index
         .evidence
@@ -189,6 +228,57 @@ mod tests {
         assert!(SYSTEM_PROMPT.contains(
             "- argue: send a short message to the other peers, citing only evidence ids you fetched yourself today. You may answer one other peer's argument by giving its id as reply_to."
         ));
+    }
+
+    #[test]
+    fn schema_withholds_only_vote_until_allowed() {
+        let fixed = schema_for(&day());
+        assert_eq!(schema_allowing(&day(), true), fixed);
+        let narrowed = schema_allowing(&day(), false);
+        let choices = narrowed["oneOf"].as_array().unwrap();
+        assert_eq!(choices.len(), 2);
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice["properties"]["action"]["const"] != "vote")
+        );
+        assert_eq!(choices, &fixed["oneOf"].as_array().unwrap()[..2]);
+    }
+
+    #[test]
+    fn gate_counts_only_this_authors_evidence_in_the_run_and_argument() {
+        for (author, run) in [("p00", "today"), ("p01", "today"), ("p00", "yesterday")] {
+            let mut index = DayIndex::default();
+            let evidence = crate::evidence::Evidence::new(
+                author.into(),
+                run.into(),
+                fetch::sources(&day())[0].clone(),
+                0,
+                "fact",
+            );
+            index
+                .evidence
+                .insert(evidence.id().0.clone(), ("record".into(), evidence));
+            assert!(!vote_gate(&index, "p00", "today").may_vote());
+            for arg_author in ["p01", "p00"] {
+                index.arguments.push(Argument {
+                    id: format!("argument-{arg_author}"),
+                    author: arg_author.into(),
+                    at_ms: 0,
+                    text: "blue".into(),
+                    cites: vec![],
+                    reply_to: None,
+                });
+                let gate = vote_gate(&index, "p00", "today");
+                assert_eq!(gate.fetched, author == "p00" && run == "today");
+                assert_eq!(gate.argued, arg_author == "p00");
+                assert_eq!(
+                    gate.may_vote(),
+                    author == "p00" && run == "today" && arg_author == "p00"
+                );
+            }
+        }
+        assert!(!vote_gate(&DayIndex::default(), "p00", "today").may_vote());
     }
 
     #[test]

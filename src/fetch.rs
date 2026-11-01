@@ -1,7 +1,7 @@
 //! The one place plumage touches the outside web: two allowlisted JSON sources,
 //! read into bounded evidence. Fetched text stays data.
 
-use std::{fmt, future::Future, time::Duration};
+use std::{fmt, future::Future, path::PathBuf, time::Duration};
 
 use serde_json::Value;
 use url::Url;
@@ -78,6 +78,29 @@ fn failure(code: &'static str, message: impl Into<String>) -> FetchError {
 /// Offline seam. `HttpSource` is the live client; tests and the lab supply their own.
 pub trait Source: Send + Sync {
     fn get(&self, url: &Url) -> impl Future<Output = Result<Vec<u8>, FetchError>> + Send;
+}
+
+/// Offline responses, selected by the allowlisted URL's host.
+pub struct FixtureSource {
+    dir: PathBuf,
+}
+
+impl FixtureSource {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+}
+
+impl Source for FixtureSource {
+    async fn get(&self, url: &Url) -> Result<Vec<u8>, FetchError> {
+        if !Allowlist::permits(url) {
+            return Err(failure("not_allowed", format!("refused {url}")));
+        }
+        let host = url.host_str().expect("allowlisted URL has a host");
+        tokio::fs::read(self.dir.join(format!("{host}.json")))
+            .await
+            .map_err(|error| failure("fetch_failed", error.to_string()))
+    }
 }
 
 /// HTTPS client for the two allowlisted hosts. Redirects and proxies are off.
@@ -383,6 +406,30 @@ astronomical_twilight_end: 2026-10-26T18:30:00+00:00"
         assert_eq!(
             extract(url, invalid, "a", 0).unwrap_err().code,
             "source_invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixture_source_reads_only_allowlisted_host_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = include_bytes!("../tests/fixtures/api.wikimedia.org.json");
+        let file = dir.path().join("api.wikimedia.org.json");
+        std::fs::write(&file, body).unwrap();
+        let source = FixtureSource::new(dir.path());
+        let urls = sources(&day("2026-10-26"));
+        assert_eq!(source.get(&urls[0]).await.unwrap(), body);
+        assert_eq!(source.get(&urls[1]).await.unwrap_err().code, "fetch_failed");
+        // A directory path that is a file cannot be read as a fixture directory.
+        // A refused URL must still fail at the allowlist before any file read.
+        let unreadable = FixtureSource::new(file);
+        assert_eq!(
+            unreadable.get(&urls[0]).await.unwrap_err().code,
+            "fetch_failed"
+        );
+        let refused = Url::parse("https://api.wikimedia.org/not-allowlisted").unwrap();
+        assert_eq!(
+            unreadable.get(&refused).await.unwrap_err().code,
+            "not_allowed"
         );
     }
 

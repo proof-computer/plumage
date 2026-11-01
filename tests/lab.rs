@@ -40,6 +40,7 @@ fn lab_refuses_a_non_empty_dir_and_out_of_range_flags() {
     assert_config(&["lab", "--dir", empty, "--peers", "65"]);
     assert_config(&["lab", "--dir", empty, "--speed", "0"]);
     assert_config(&["lab", "--dir", empty, "--no-such-flag"]);
+    assert_config(&["lab", "--dir", empty, "--fixture-source"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -56,6 +57,8 @@ async fn three_peers() {
         .arg("lab")
         .arg("--dir")
         .arg(dir.path())
+        .arg("--fixture-source")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
         .arg("--peers")
         .arg("3")
         .arg("--model-url")
@@ -117,6 +120,7 @@ async fn three_peers() {
     let lab: Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("lab.json")).unwrap()).unwrap();
     assert!(lab.get("token").is_none());
+    assert!(lab.get("fixture_source").is_none());
     assert_eq!(lab["peers"], json!(["p00", "p01", "p02"]));
     assert_eq!(lab["first_day"], "2026-10-26");
     assert_eq!(lab["speed"], 2880);
