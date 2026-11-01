@@ -48,7 +48,15 @@ impl<'a, S: Source> Activation for PeerActivation<'a, S> {
     async fn before_turn(&mut self, _turn: usize, context: &mut Value) -> Result<Option<String>> {
         let index = self.book.index();
         let fetches_left = FETCHES_PER_ACTIVATION.saturating_sub(self.completed_fetches);
-        *context = prompt::context(&self.day, &self.clock, self.peer_id, &index, fetches_left);
+        let gate = prompt::vote_gate(&index, self.peer_id, &self.book.ledger().config.run_id);
+        *context = prompt::context(
+            &self.day,
+            &self.clock,
+            self.peer_id,
+            &index,
+            fetches_left,
+            gate,
+        );
         Ok(None)
     }
 
@@ -213,9 +221,10 @@ pub async fn activate<S: Source>(
     fetch_failures: &mut Vec<FetchFailure>,
 ) -> Result<Colour> {
     let index = book.index();
-    let context = prompt::context(&day, &clock, peer_id, &index, FETCHES_PER_ACTIVATION);
+    let gate = prompt::vote_gate(&index, peer_id, &book.ledger().config.run_id);
+    let context = prompt::context(&day, &clock, peer_id, &index, FETCHES_PER_ACTIVATION, gate);
     let mut messages = vec![
-        json!({"role": "system", "content": prompt::SYSTEM_PROMPT}),
+        json!({"role": "system", "content": prompt::system_prompt()}),
         json!({"role": "user", "content": context.to_string()}),
     ];
     let mut host = PeerActivation {
@@ -571,6 +580,61 @@ mod tests {
                 prompt::schema_allowing(&day(), *allowed)
             );
         }
+    }
+
+    fn assert_context_matches_next_schema(requests: &[(String, Value)]) {
+        let mut pending = None;
+        let mut turns = 0;
+        for (path, body) in requests {
+            match path.as_str() {
+                "/apply-template" => {
+                    assert!(pending.is_none(), "each template must reach a completion");
+                    assert_eq!(body["messages"][0]["content"], prompt::system_prompt());
+                    let context: Value =
+                        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap())
+                            .unwrap();
+                    pending = Some(context);
+                }
+                "/completion" => {
+                    let context = pending.take().expect("a context before each completion");
+                    let offers_vote = body["json_schema"]["oneOf"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|choice| choice["properties"]["action"]["const"] == "vote");
+                    assert_eq!(context["may_vote"], offers_vote);
+                    assert_eq!(
+                        context["before_vote"].as_array().unwrap().is_empty(),
+                        offers_vote
+                    );
+                    turns += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(pending.is_none());
+        assert_eq!(turns, 3);
+    }
+
+    #[test]
+    fn drop_oldest_removes_arguments_then_own_evidence() {
+        let mut context = json!({
+            "arguments": [{"id": "a1"}, {"id": "a2"}],
+            "your_evidence": [{"id": "e1"}, {"id": "e2"}],
+            "may_vote": true,
+        });
+        for (arguments, evidence) in [
+            (json!([{"id": "a2"}]), json!([{"id": "e1"}, {"id": "e2"}])),
+            (json!([]), json!([{"id": "e1"}, {"id": "e2"}])),
+            (json!([]), json!([{"id": "e2"}])),
+            (json!([]), json!([])),
+        ] {
+            assert!(drop_oldest(&mut context));
+            assert_eq!(context["arguments"], arguments);
+            assert_eq!(context["your_evidence"], evidence);
+            assert_eq!(context["may_vote"], true);
+        }
+        assert!(!drop_oldest(&mut context));
     }
 
     async fn settled(book: &Book) {
@@ -955,6 +1019,7 @@ mod tests {
                 serde_json::from_str::<Value>(messages[1]["content"].as_str().unwrap()).unwrap(),
                 messages[1]["content"].as_str().unwrap().to_owned(),
             ));
+            assert_context_matches_next_schema(&requests);
             assert_schemas(
                 &requests,
                 if peer == "p00" {
@@ -964,6 +1029,7 @@ mod tests {
                 },
             );
         }
+        assert_eq!(prompts[0].0, prompt::system_prompt());
         assert_eq!(prompts[0].0, prompts[1].0);
         assert!(prompts[0].0.contains(closing::RULE));
         assert_eq!(prompts[0].1["you"], "p00");
