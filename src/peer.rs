@@ -25,7 +25,7 @@ use crate::book::{Argument, Book, DayIndex};
 use crate::clock::DayClock;
 use crate::closing::{self, Decision, Vote};
 use crate::colour::Colour;
-use crate::config::{DATABASE_CACHE_BYTES, MAX_DOCUMENTS, PeerConfig};
+use crate::config::{DATABASE_CACHE_BYTES, MAX_DOCUMENTS, PeerConfig, TEMPERATURE};
 use crate::day::Day;
 use crate::error::{Error, Result};
 use crate::evidence::Evidence;
@@ -110,6 +110,7 @@ pub async fn run<S: Source + 'static>(
     let state = RunState {
         activations: Activations::default(),
         started_real_ms: forthebirds_store::now(),
+        decided_sim_ms: None,
     };
     tokio::fs::create_dir_all(&config.data_dir)
         .await
@@ -125,11 +126,7 @@ pub async fn run<S: Source + 'static>(
     write_assets(&config.site_dir).await?;
     let day = config.clock.day();
     let previous_day = day.previous();
-    let phase = if config.clock.now_ms() >= day.close_ms() {
-        Phase::SyncOnly
-    } else {
-        Phase::Voting
-    };
+    let phase = state.phase(day, config.clock.now_ms());
     write_status(
         &config,
         day,
@@ -147,6 +144,7 @@ pub async fn run<S: Source + 'static>(
         embedding_url: None,
         context_tokens: config.context_tokens,
         output_tokens: config.output_tokens,
+        temperature: TEMPERATURE,
         render_tokens: None,
         inference_timeout_seconds: config.inference_timeout_seconds,
         request_timeout_seconds: config.request_timeout_seconds,
@@ -338,12 +336,8 @@ impl Shared {
             write_live(&self.config, &open_book, open).await?;
             let names = display_names(&self.config.peer_id, std::iter::empty());
             write_how(&self.config, &names, closed.paint).await?;
-            let phase = if self.config.clock.now_ms() >= open.close_ms() {
-                Phase::SyncOnly
-            } else {
-                Phase::Voting
-            };
             let state = self.state.lock().await;
+            let phase = state.phase(open, self.config.clock.now_ms());
             let index = open_book.index();
             write_status(
                 &self.config,
@@ -417,7 +411,9 @@ async fn run_days<S: Source>(
     mut day: Day,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-    for age in (0..=KEEP_CLOSED_DAYS).rev() {
+    // A historical sync can repaint today's pages immediately. Make its book
+    // available before starting any historical sync task.
+    for age in 0..=KEEP_CLOSED_DAYS {
         let cache = if age == 0 {
             DATABASE_CACHE_BYTES
         } else {
@@ -447,6 +443,7 @@ async fn run_days<S: Source>(
         shared.insert(next, DATABASE_CACHE_BYTES).await?;
         shared.stop_member(rewind(day, KEEP_CLOSED_DAYS)).await?;
         day = next;
+        shared.state.lock().await.decided_sim_ms = None;
     }
 }
 
@@ -491,6 +488,15 @@ async fn run_day<S: Source>(
             .await?;
             break;
         }
+        let (decided, newly_decided) = {
+            let mut state = shared.state.lock().await;
+            let newly_decided =
+                state.observe_decision(&frame_from(&book.index(), &config.clock).votes, day, now);
+            (state.decided_sim_ms.is_some(), newly_decided)
+        };
+        if newly_decided {
+            write_open(config, &book, day, shared).await?;
+        }
         let due = last_start.is_none_or(|started: u64| {
             now.saturating_sub(started) >= config.activation_interval_ms
         });
@@ -508,6 +514,12 @@ async fn run_day<S: Source>(
             continue;
         }
         last_start = Some(now);
+        if decided {
+            if !newly_decided {
+                write_open(config, &book, day, shared).await?;
+            }
+            continue;
+        }
         let id = format!("a{now}");
         let mut fetch_failures = Vec::new();
         match activation::activate(
@@ -561,23 +573,7 @@ async fn run_day<S: Source>(
                 config.peer_id, failure.host, failure.code
             );
         }
-        let previous = day.previous();
-        let paint = read_paint(&config.site_dir, previous).await?;
-        let index = book.index();
-        {
-            let _site = shared.site.lock().await;
-            write_live(config, &book, day).await?;
-            let state = shared.state.lock().await;
-            write_status(
-                config,
-                day,
-                Phase::Voting,
-                Some(&index),
-                &state,
-                (previous, paint),
-            )
-            .await?;
-        }
+        write_open(config, &book, day, shared).await?;
     }
     if wait_until(&config.clock, day.next().open_ms(), shutdown, shared).await {
         if let Some(error) = shared.error.lock().await.take() {
@@ -593,6 +589,25 @@ async fn run_day<S: Source>(
     shared.note_closed(day).await;
     drop(book);
     Ok(false)
+}
+
+/// Refresh the live pages on the activation cadence, including after decision.
+async fn write_open(config: &PeerConfig, book: &Book, day: Day, shared: &Shared) -> Result<()> {
+    let _site = shared.site.lock().await;
+    let previous = day.previous();
+    let paint = read_paint(&config.site_dir, previous).await?;
+    let index = book.index();
+    write_live(config, book, day).await?;
+    let state = shared.state.lock().await;
+    write_status(
+        config,
+        day,
+        state.phase(day, config.clock.now_ms()),
+        Some(&index),
+        &state,
+        (previous, paint),
+    )
+    .await
 }
 
 fn ledger_config(config: &PeerConfig, day: Day, cache: usize) -> LedgerConfig {
@@ -1130,6 +1145,32 @@ fn neighbours(archive: &[(Day, Paint)], day: Day, today: Day) -> Neighbours {
 struct RunState {
     activations: Activations,
     started_real_ms: u64,
+    /// Once observed, late-arriving records cannot restart this day's activations.
+    decided_sim_ms: Option<u64>,
+}
+
+impl RunState {
+    fn observe_decision(&mut self, votes: &[Vote], day: Day, now: u64) -> bool {
+        let newly_decided = self.decided_sim_ms.is_none()
+            && matches!(
+                closing::decide(votes, day.open_ms(), now),
+                Decision::Decided { .. }
+            );
+        if newly_decided {
+            self.decided_sim_ms = Some(now);
+        }
+        newly_decided
+    }
+
+    fn phase(&self, day: Day, now: u64) -> Phase {
+        if now >= day.close_ms() {
+            Phase::SyncOnly
+        } else if self.decided_sim_ms.is_some() {
+            Phase::Decided
+        } else {
+            Phase::Voting
+        }
+    }
 }
 
 async fn write_status(
@@ -1269,6 +1310,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_decision_stays_latched_when_late_votes_change_the_rule_result() {
+        let day: Day = "2026-10-26".parse().unwrap();
+        let open = day.open_ms();
+        let mut state = RunState {
+            activations: Activations::default(),
+            started_real_ms: 0,
+            decided_sim_ms: None,
+        };
+        let mut votes: Vec<_> = [open, open + closing::HOLD_MS / 2]
+            .into_iter()
+            .map(|at_ms| Vote {
+                author: "a".into(),
+                colour: Colour::Blue,
+                at_ms,
+            })
+            .collect();
+        assert_eq!(state.phase(day, open), Phase::Voting);
+        assert!(!state.observe_decision(&votes, day, open + closing::HOLD_MS - 1));
+        let now = open + closing::HOLD_MS;
+        assert!(state.observe_decision(&votes, day, now));
+        assert_eq!(state.phase(day, now), Phase::Decided);
+        votes.push(Vote {
+            author: "b".into(),
+            colour: Colour::Red,
+            at_ms: open,
+        });
+        assert_eq!(closing::decide(&votes, open, now), Decision::Undecided);
+        assert!(!state.observe_decision(&votes, day, now));
+        assert_eq!(state.decided_sim_ms, Some(now));
+        assert_eq!(state.phase(day, now), Phase::Decided);
+        assert_eq!(state.phase(day, day.close_ms()), Phase::SyncOnly);
+    }
+
+    #[test]
     fn neighbours_skip_gaps_and_stop_at_the_open_day() {
         let first: Day = "2026-10-21".parse().unwrap();
         let middle: Day = "2026-10-24".parse().unwrap();
@@ -1385,6 +1460,7 @@ mod tests {
         let state = RunState {
             activations: Activations::default(),
             started_real_ms: 0,
+            decided_sim_ms: None,
         };
         write_status(
             &config,

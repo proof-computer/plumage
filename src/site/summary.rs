@@ -33,6 +33,8 @@ pub const RECENT_WINDOW: usize = 20;
 pub enum Phase {
     /// Activations are still running.
     Voting,
+    /// The open day has a colour; activations have stopped and sync continues.
+    Decided,
     /// The day has reached close and the peer is waiting to publish.
     SyncOnly,
     /// The day's decision is published.
@@ -414,6 +416,7 @@ mod tests {
 
         for (phase, name) in [
             (Phase::Voting, "voting"),
+            (Phase::Decided, "decided"),
             (Phase::SyncOnly, "sync_only"),
             (Phase::Closed, "closed"),
         ] {
