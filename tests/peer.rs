@@ -219,6 +219,39 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     })
     .await;
     assert!(!site.join(format!("days/{DAY}.json")).exists());
+    let status_path = site.join("status.json");
+    until("decided phase before close", || {
+        read_json(&status_path)["phase"] == "decided"
+    })
+    .await;
+    assert!(shared.now_ms() < day().close_ms());
+    assert!(!site.join(format!("days/{DAY}.json")).exists());
+    let decided = read_json(&status_path);
+    let decided_started = decided["activations"]["started"].as_u64().unwrap();
+    let live_paths = [
+        site.join("index.html"),
+        site.join("flock.html"),
+        site.join(format!("days/{DAY}.html")),
+        archive_path.clone(),
+    ];
+    let decided_pages: Vec<_> = live_paths
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect();
+    until("live pages refresh after activations stop", || {
+        live_paths.iter().zip(&decided_pages).all(|(path, before)| {
+            let after = std::fs::read_to_string(path).unwrap();
+            after.split_once("Records as of ").unwrap().1
+                != before.split_once("Records as of ").unwrap().1
+        })
+    })
+    .await;
+    assert!(shared.now_ms() < day().close_ms());
+    assert!(!site.join(format!("days/{DAY}.json")).exists());
+    assert_eq!(
+        read_json(&status_path)["activations"]["started"],
+        decided_started
+    );
     run.await.unwrap().unwrap();
     let ended = wall_now();
     drop(sender);
@@ -257,6 +290,11 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     assert_eq!(status["schema"], "plumage.status.v1");
     assert!(status["fetch_failures_by_code"].is_object());
     assert_eq!(status["phase"], "closed");
+    assert_eq!(status["activations"]["started"], decided_started);
+    assert_eq!(
+        status["activations"]["last_real_ms"],
+        decided["activations"]["last_real_ms"]
+    );
     assert_eq!(status["day"], DAY);
     assert_eq!(status["previous_day"]["paint"], "decided:blue");
     assert!(status["activations"]["voted"].as_u64().unwrap() >= 1);
@@ -297,6 +335,7 @@ async fn two_peers_replicate_votes_and_stay_undecided_on_a_tie() {
         }],
         shared,
     );
+    let activation_interval_ms = left.activation_interval_ms;
     let (_left_stop, left_rx) = watch::channel(false);
     let (_right_stop, right_rx) = watch::channel(false);
     let (left_run, right_run) = tokio::join!(start(left, left_rx), start(right, right_rx),);
@@ -327,6 +366,9 @@ async fn two_peers_replicate_votes_and_stay_undecided_on_a_tie() {
         )
         .unwrap();
         assert_eq!(status["authors_seen"], json!(["p00", "p01"]));
+        assert_eq!(status["phase"], "closed");
+        let last = shared.sim(status["activations"]["last_real_ms"].as_u64().unwrap());
+        assert!(day().close_ms().abs_diff(last) <= 2 * activation_interval_ms);
     }
 }
 
@@ -425,7 +467,7 @@ async fn an_incoming_job_recomputes_yesterday_from_the_sibling_ledger() {
     let mut follower = peer_config(root.path(), "p01", &model, follower_peers, shared);
     follower.last_day = Some(shift(day(), 1));
     let (stop_follower, follower_rx) = watch::channel(false);
-    let follower_run = tokio::spawn(async move { start(follower, follower_rx).await });
+    let mut follower_run = tokio::spawn(async move { start(follower, follower_rx).await });
     let copied = root.path().join(format!("p01-site/days/{DAY}.json"));
     until("follower recomputes yesterday", || copied.is_file()).await;
     assert_eq!(
@@ -435,14 +477,16 @@ async fn an_incoming_job_recomputes_yesterday_from_the_sibling_ledger() {
 
     let leader_status = root.path().join("p00-site/status.json");
     let follower_status = root.path().join("p01-site/status.json");
-    until("both peers paint yesterday", || {
-        let leader = read_json(&leader_status);
-        let follower = read_json(&follower_status);
-        leader["previous_day"]["day"] == DAY
-            && follower["previous_day"] == leader["previous_day"]
-            && follower["previous_day"]["paint"] != "no_record"
-    })
-    .await;
+    tokio::select! {
+        result = &mut follower_run => panic!("follower stopped before publishing its live state: {result:?}"),
+        () = until("both peers paint yesterday", || {
+            let leader = read_json(&leader_status);
+            let follower = read_json(&follower_status);
+            leader["previous_day"]["day"] == DAY
+                && follower["previous_day"] == leader["previous_day"]
+                && follower["previous_day"]["paint"] != "no_record"
+        }) => {}
+    }
     let live_path = root.path().join("p01-site/days/2026-10-27.html");
     until("open day links the first closed day", || {
         std::fs::read_to_string(&live_path).is_ok_and(|html| {

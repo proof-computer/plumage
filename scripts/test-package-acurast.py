@@ -57,6 +57,7 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(item['bytes'], len(data))
             self.assertEqual(peer['listen'], '[::]:8841')
             self.assertEqual(peer['inference_timeout_seconds'], 1200)
+            self.assertEqual(peer['activation_interval_ms'], 600000)
             self.assertEqual(peer['model_url'], 'http://127.0.0.1:8081/')
             self.assertEqual(peer['data_dir'], 'state/data')
             self.assertEqual(peer['site_dir'], 'state/site')

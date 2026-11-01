@@ -270,6 +270,7 @@ fn take_first(context: &mut Value, key: &str) -> bool {
 mod tests {
     use super::*;
     use crate::closing;
+    use crate::config::TEMPERATURE;
     use crate::fetch::FetchError;
     use crate::record::Record;
     use axum::{Json, Router, extract::State, routing::post};
@@ -504,6 +505,7 @@ mod tests {
             embedding_url: None,
             context_tokens: 4096,
             output_tokens: 64,
+            temperature: TEMPERATURE,
             render_tokens: None,
             inference_timeout_seconds: 30,
             request_timeout_seconds: 30,

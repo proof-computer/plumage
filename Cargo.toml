@@ -13,13 +13,13 @@ name = "plumage"
 path = "src/main.rs"
 
 [dependencies]
-forthebirds-inference = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
-forthebirds-names = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
-forthebirds-net = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
-forthebirds-runtime = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
-forthebirds-store = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
-forthebirds-sync = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
-liskov-cargo-harness = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
+forthebirds-inference = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }
+forthebirds-names = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }
+forthebirds-net = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }
+forthebirds-runtime = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }
+forthebirds-store = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }
+forthebirds-sync = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }
+liskov-cargo-harness = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,4 +37,4 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 
 [patch.crates-io]
-rouchdb-adapter-redb = { git = "https://github.com/proof-computer/forthebirds", rev = "0ae712dfa9297089a5e1c80461e6037822eb5d5a" }
+rouchdb-adapter-redb = { git = "https://github.com/proof-computer/forthebirds", rev = "5f84ad1e795b1ab4b2aa4d0bb2d4843e74f4a264" }

@@ -20,6 +20,8 @@ pub const DEFAULT_SYNC_INTERVAL_MS: u64 = 5_000;
 pub const DEFAULT_MAX_STEPS: u32 = 16;
 pub const DEFAULT_CONTEXT_TOKENS: usize = 4_096;
 pub const DEFAULT_OUTPUT_TOKENS: u32 = 512;
+/// Plumage generation temperature, decided in ADR-0271 §4.
+pub const TEMPERATURE: f64 = 0.7;
 pub const DEFAULT_INFERENCE_TIMEOUT_SECONDS: u64 = 180;
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_FETCH_TIMEOUT_SECONDS: u64 = 10;
