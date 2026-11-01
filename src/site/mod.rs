@@ -290,7 +290,6 @@ mod tests {
         let raw_at = day.find("arg-1").expect("earlier argument id");
         let plain_at = day.find("arg-2").expect("later argument id");
         assert!(raw_at < plain_at);
-        assert!(front.contains("argued, voting"));
-        assert!(front.contains("no vote yet"));
+        assert!(front.contains("argued, not voted yet"));
     }
 }

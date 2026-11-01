@@ -23,6 +23,8 @@ pub const VOTES_CAST_RULE: &str =
     "Votes cast is the number of vote records from the day's open through the time.";
 pub const ARGUMENTS_RULE: &str = "An argument count is the number of argue records an author wrote; the day's total is their sum.";
 pub const TRAIL_RULE: &str = "An author's trail is that author's votes in the order the closing rule replays them, oldest first.";
+pub const SPAN_RULE: &str = "A span is a run of consecutive votes by one author naming the same colour; it shows the first and last of them.";
+pub const ARGUE_LABEL_RULE: &str = "An argument's label is its author's next vote at or after the argument; 'not voted yet' when there is none.";
 pub const CITATIONS_RULE: &str = "A fact's citation count is the number of arguments that cite it; an argument citing it twice counts once.";
 pub const DAYS_PER_COLOUR_RULE: &str = "A colour's day count is the number of closed days whose decision named it. Undecided days are counted apart.";
 
@@ -171,6 +173,43 @@ pub fn trails(votes: &[Vote]) -> BTreeMap<String, Vec<(u64, Colour)>> {
             .push((vote.at_ms, vote.colour));
     }
     trails
+}
+
+/// One maximal same-colour run of an author's ordered trail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Span {
+    pub colour: Colour,
+    pub first_ms: u64,
+    pub last_ms: u64,
+    pub count: usize,
+}
+
+/// Collapse consecutive entries of a trail ordered by [`trails`].
+pub fn spans(trail: &[(u64, Colour)]) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::new();
+    for &(at_ms, colour) in trail {
+        if let Some(span) = spans.last_mut().filter(|span| span.colour == colour) {
+            span.last_ms = at_ms;
+            span.count += 1;
+        } else {
+            spans.push(Span {
+                colour,
+                first_ms: at_ms,
+                last_ms: at_ms,
+                count: 1,
+            });
+        }
+    }
+    spans
+}
+
+/// The author's first vote at or after `at_ms`, in the replay order.
+pub fn vote_after(votes: &[Vote], author: &str, at_ms: u64) -> Option<Colour> {
+    votes
+        .iter()
+        .filter(|vote| vote.author == author && vote.at_ms >= at_ms)
+        .min_by_key(|vote| (vote.at_ms, vote.author.as_str(), vote.colour))
+        .map(|vote| vote.colour)
 }
 
 /// Arguments citing each evidence id. An id cited twice by one argument counts once.
@@ -384,6 +423,81 @@ mod tests {
                 .get("ada")
                 .and_then(|trail| trail.last())
                 .map(|(_, colour)| colour)
+        );
+    }
+
+    #[test]
+    fn spans_collapse_first_day_runs_and_keep_same_time_replay_order() {
+        use Colour::Black;
+        let at = |hour: u64, minute: u64| hour * HOUR_MS + minute * 60_000;
+        let runs = [
+            ("corncrake", Blue, at(13, 38), at(13, 39), 2),
+            ("corncrake", Black, at(13, 56), at(14, 49), 43),
+            ("corncrake", Blue, at(14, 50), at(15, 28), 30),
+            ("avocet", Blue, at(13, 38), at(16, 28), 89),
+        ];
+        let mut votes = Vec::new();
+        for (author, colour, first, last, count) in runs {
+            for index in 0..count {
+                votes.push(vote(
+                    author,
+                    colour,
+                    first + (last - first) * index / (count - 1),
+                ));
+            }
+        }
+        votes.reverse();
+        let trails = trails(&votes);
+        let expected = |colour, first_ms, last_ms, count| Span {
+            colour,
+            first_ms,
+            last_ms,
+            count,
+        };
+        assert_eq!(
+            spans(&trails["corncrake"]),
+            vec![
+                expected(Blue, at(13, 38), at(13, 39), 2),
+                expected(Black, at(13, 56), at(14, 49), 43),
+                expected(Blue, at(14, 50), at(15, 28), 30),
+            ]
+        );
+        assert_eq!(
+            spans(&trails["avocet"]),
+            vec![expected(Blue, at(13, 38), at(16, 28), 89)]
+        );
+        assert!(spans(&[]).is_empty());
+        let tied = super::trails(&[vote("ada", Blue, 5), vote("ada", Red, 5)]);
+        assert_eq!(
+            spans(&tied["ada"]),
+            vec![expected(Red, 5, 5, 1), expected(Blue, 5, 5, 1)]
+        );
+        assert_eq!(
+            spans(&[(0, Blue), (0, Blue)]),
+            vec![expected(Blue, 0, 0, 2)]
+        );
+    }
+
+    #[test]
+    fn argument_label_uses_the_next_vote_including_the_exact_time() {
+        use Colour::Black;
+        let at = |hour: u64, minute: u64| hour * HOUR_MS + minute * 60_000;
+        let votes = [
+            vote("corncrake", Blue, at(14, 50)),
+            vote("other", Red, at(13, 41)),
+            vote("corncrake", Blue, at(13, 38)),
+            vote("corncrake", Black, at(13, 56)),
+        ];
+        assert_eq!(vote_after(&votes, "corncrake", at(13, 41)), Some(Black));
+        assert_eq!(vote_after(&votes, "corncrake", at(13, 56)), Some(Black));
+        assert_eq!(vote_after(&votes, "corncrake", at(14, 51)), None);
+        assert_eq!(vote_after(&votes, "absent", 0), None);
+        assert_eq!(vote_after(&[], "corncrake", 0), None);
+        let tied = [vote("ada", Blue, 5), vote("ada", Red, 5)];
+        assert_eq!(vote_after(&tied, "ada", 5), Some(Red));
+        assert_eq!(
+            vote_after(&[tied[1].clone(), tied[0].clone()], "ada", 5),
+            Some(Red)
         );
     }
 
