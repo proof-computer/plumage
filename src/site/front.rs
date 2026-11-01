@@ -10,8 +10,8 @@ use crate::day::{Day, utc_time};
 use crate::evidence::{Evidence, SUNRISE_HOST, WIKIMEDIA_HOST};
 use crate::tally::{
     ARGUMENTS_RULE, CITATIONS_RULE, COUNTS_RULE, CURRENT_VOTES_RULE, FETCHES_RULE,
-    VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations, counts, current_votes, trails, vote_changes,
-    votes_cast,
+    VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations, counts, current_votes, live_votes, trails,
+    vote_changes, votes_cast,
 };
 
 use super::layout::{chip, document, formula, peer, push_escaped};
@@ -28,14 +28,14 @@ const FACTS_SHOWN: usize = 12;
 pub fn render_front(page: &DayPage<'_>) -> String {
     let now = page.chrome.as_of_ms;
     let open = page.day.open_ms();
-    let live = live_voters(page.votes, open, page.day.close_ms());
+    let live = live_voters(page.votes, open, now);
     let mut body = String::new();
     push_hero(&mut body, page, live.len());
     push_right_now(&mut body, page, &live, now, open);
     body.push_str("</section>\n");
     push_current(&mut body, page, now);
     push_numbers(&mut body, page, live.len(), now, open);
-    push_activity(&mut body, page, &live, now, open);
+    push_activity(&mut body, page, now, open);
     let title = format!("Today {}", page.day);
     document(&title, Some(Section::Today), 0, &page.chrome, &body)
 }
@@ -99,13 +99,13 @@ fn push_right_now(out: &mut String, page: &DayPage<'_>, live: &[String], now: u6
     out.push_str("<section class=\"card hero-card\"><p class=\"mono muted\" style=\"margin:0;font-size:13px\">RIGHT NOW · ");
     out.push_str(&hhmm(now));
     out.push_str(" UTC</p>\n");
-    match decide(page.votes, live, open, now) {
+    match decide(page.votes, open, now) {
         Decision::Decided {
             colour,
             held_from_ms,
             held_to_ms,
         } => push_decided(out, colour, held_from_ms, held_to_ms),
-        Decision::Undecided => match holding(page.votes, live, open, now) {
+        Decision::Undecided => match holding(page.votes, open, now) {
             Some(hold) => push_holding(out, page, live, now, &hold),
             None => push_no_hold(out, page, live.len(), now),
         },
@@ -149,11 +149,10 @@ fn push_holding(
     now: u64,
     hold: &crate::closing::Hold,
 ) {
-    let current = current_votes(page.votes, now);
-    let count = live
-        .iter()
-        .filter(|author| current.get(author.as_str()) == Some(&hold.colour))
-        .count();
+    let count = counts(page.votes, page.day.open_ms(), now)
+        .get(&hold.colour)
+        .copied()
+        .unwrap_or(0);
     let capped = now.saturating_sub(hold.from_ms).min(HOLD_MS);
     let minutes = capped / 60_000;
     let deadline = hhmm(hold.from_ms.saturating_add(HOLD_MS));
@@ -200,7 +199,7 @@ fn push_holding(
 }
 
 fn push_no_hold(out: &mut String, page: &DayPage<'_>, live: usize, now: u64) {
-    let totals = counts(page.votes, now);
+    let totals = counts(page.votes, page.day.open_ms(), now);
     if totals.is_empty() {
         out.push_str("<p>No votes yet today.</p>\n");
         return;
@@ -227,8 +226,8 @@ fn push_no_hold(out: &mut String, page: &DayPage<'_>, live: usize, now: u64) {
 }
 
 fn push_current(out: &mut String, page: &DayPage<'_>, now: u64) {
-    let current = current_votes(page.votes, now);
-    let totals = counts(page.votes, now);
+    let current = live_votes(page.votes, page.day.open_ms(), now);
+    let totals = counts(page.votes, page.day.open_ms(), now);
     let mut authors_of: BTreeMap<Colour, Vec<&str>> = BTreeMap::new();
     for (author, colour) in &current {
         authors_of.entry(*colour).or_default().push(author);
@@ -281,7 +280,12 @@ fn push_current(out: &mut String, page: &DayPage<'_>, now: u64) {
 fn push_numbers(out: &mut String, page: &DayPage<'_>, live: usize, now: u64, open: u64) {
     let changes: usize = vote_changes(page.votes).values().sum();
     out.push_str("<section class=\"numbers\" aria-label=\"Today in numbers\">\n");
-    push_stat(out, live, "live voters", LIVE_RULE);
+    push_stat(
+        out,
+        live,
+        &format!("live voters at {}", hhmm(now)),
+        LIVE_RULE,
+    );
     push_stat(
         out,
         votes_cast(page.votes, open, now),
@@ -304,9 +308,9 @@ fn push_stat(out: &mut String, number: usize, label: &str, rule: &str) {
     out.push_str("</div>\n");
 }
 
-fn push_activity(out: &mut String, page: &DayPage<'_>, live: &[String], now: u64, open: u64) {
+fn push_activity(out: &mut String, page: &DayPage<'_>, now: u64, open: u64) {
     out.push_str("<div class=\"split\">\n<section class=\"card main\" aria-labelledby=\"day-h\"><h2 id=\"day-h\">The day so far</h2>\n<p class=\"muted\" style=\"font-size:15px\">Arguments and vote changes, newest first. Every message is the peer’s own words, quoted as data.</p><ol class=\"timeline\">\n");
-    for event in timeline(page, live, now, open) {
+    for event in timeline(page, now, open) {
         match event {
             Event::Argument {
                 at_ms,
@@ -325,7 +329,13 @@ fn push_activity(out: &mut String, page: &DayPage<'_>, live: &[String], now: u64
                 at_ms,
                 colour,
                 count,
-            } => push_marker(out, at_ms, colour, count, live.len()),
+            } => push_marker(
+                out,
+                at_ms,
+                colour,
+                count,
+                live_voters(page.votes, open, at_ms).len(),
+            ),
         }
     }
     out.push_str("</ol>\n<a href=\"days/");
@@ -565,7 +575,7 @@ impl Event<'_> {
     }
 }
 
-fn timeline<'a>(page: &'a DayPage<'a>, live: &[String], now: u64, open: u64) -> Vec<Event<'a>> {
+fn timeline<'a>(page: &'a DayPage<'a>, now: u64, open: u64) -> Vec<Event<'a>> {
     let mut events = Vec::new();
     for argument in page.arguments {
         if (open..=now).contains(&argument.at_ms) {
@@ -592,12 +602,11 @@ fn timeline<'a>(page: &'a DayPage<'a>, live: &[String], now: u64, open: u64) -> 
             }
         }
     }
-    if let Some(hold) = holding(page.votes, live, open, now) {
-        let current = current_votes(page.votes, hold.from_ms);
-        let count = live
-            .iter()
-            .filter(|author| current.get(author.as_str()) == Some(&hold.colour))
-            .count();
+    if let Some(hold) = holding(page.votes, open, now) {
+        let count = counts(page.votes, open, hold.from_ms)
+            .get(&hold.colour)
+            .copied()
+            .unwrap_or(0);
         events.push(Event::Marker {
             at_ms: hold.from_ms,
             colour: hold.colour,
@@ -850,7 +859,7 @@ mod tests {
             votes.push(vote(&format!("red-{index}"), Red, at(15, 5)));
         }
         for index in 0..5 {
-            votes.push(vote(&format!("blue-{index}"), Blue, at(14, 0)));
+            votes.push(vote(&format!("blue-{index}"), Blue, at(14, 50)));
         }
         let names = BTreeMap::new();
         let shown = page_at(&votes, &[], &[], Paint::NoRecord, at(15, 42), &names);
@@ -966,6 +975,37 @@ mod tests {
     }
 
     #[test]
+    fn current_counts_and_tiles_only_include_live_voters() {
+        let votes = [
+            vote("old-a", Red, at(9, 0)),
+            vote("old-b", Green, at(9, 30)),
+            vote("old-c", Red, at(9, 59)),
+            vote("old-d", Green, at(10, 0)),
+            vote("live-a", Blue, at(10, 40)),
+            vote("live-b", Blue, at(10, 45)),
+        ];
+        let names = BTreeMap::new();
+        let html = render_front(&page_at(
+            &votes,
+            &[],
+            &[],
+            Paint::NoRecord,
+            at(11, 0),
+            &names,
+        ));
+        assert!(html.contains("2</span><span class=\"label\">live voters at 11:00"));
+        assert!(html.contains("blue 2"));
+        assert!(html.contains("2 of 2 live voters · more than half needs 2"));
+        let current = html.split_once("aria-labelledby=\"votes-h\"").unwrap().1;
+        let current = current.split_once("</section>").unwrap().0;
+        assert_eq!(current.matches("<li class=\"tile\">").count(), 2);
+        for author in ["old-a", "old-b", "old-c", "old-d"] {
+            assert!(!current.contains(author));
+        }
+        assert_prohibitions(&html);
+    }
+
+    #[test]
     fn five_numbers_match_the_tally_functions_beside_their_rules() {
         let votes = [
             vote("ada", Red, 0),
@@ -995,8 +1035,8 @@ mod tests {
         assert_eq!((live, cast, changes), (2, 3, 1));
         assert_beside(
             &html,
-            "<span class=\"n\">2</span><span class=\"label\">live voters</span>",
-            "The live voters are the distinct authors",
+            "<span class=\"n\">2</span><span class=\"label\">live voters at 00:00</span>",
+            "The live voters at a time are the authors",
         );
         assert_beside(
             &html,
@@ -1080,7 +1120,11 @@ mod tests {
             "cited-excerpt",
         );
         let fact_id = cited.id().0.clone();
-        let votes = [vote("ada", Red, at(10, 0)), vote("ada", Blue, at(11, 0))];
+        let votes = [
+            vote("ada", Red, at(10, 0)),
+            vote("ada", Blue, at(11, 0)),
+            vote("ada", Blue, at(12, 30)),
+        ];
         let argued = [argument(
             "arg-late",
             "ada",

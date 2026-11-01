@@ -1,12 +1,12 @@
-//! The day's closing rule over caller-supplied live voters and vote records.
+//! The day's closing rule over replicated votes and their hourly expiry.
 
 use crate::colour::Colour;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const HOLD_MS: u64 = 3_600_000;
 pub const RULE: &str = "The day's colour is the first colour held by more than half of the live voters for a continuous hour ending at or before close; otherwise the day is undecided.";
-pub const LIVE_RULE: &str = "The live voters are the distinct authors of vote records cast between the day's open (00:00 UTC) and close (23:00 UTC).";
-pub const HOLDING_RULE: &str = "A colour holds while more than half of the live voters' current votes name it. A hold starts at the vote that made it more than half and ends at the vote that made it half or fewer.";
+pub const LIVE_RULE: &str = "The live voters at a time are the authors whose newest vote at or before that time, cast between the day's open (00:00 UTC) and close (23:00 UTC), is less than one hour old. An author leaves the live voters one hour after its last vote and returns with its next vote.";
+pub const HOLDING_RULE: &str = "A colour holds while more than half of the live voters' current votes name it. A hold starts at the moment that makes it more than half and ends at the moment that makes it half or fewer; either moment is a vote or an expiry, the instant an author's newest vote becomes one hour old. No colour holds while there are no live voters.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Vote {
@@ -27,8 +27,8 @@ pub enum Decision {
 
 /// One run in which a colour held more than half of the live voters.
 ///
-/// `to_ms` is the vote that ended the run. It is absent while the run is still
-/// held after the last replayed vote.
+/// `to_ms` is the vote or expiry that ended the run. It is absent while the run
+/// is still held after the last replayed event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hold {
     pub colour: Colour,
@@ -40,8 +40,8 @@ pub struct Hold {
 /// for simultaneous votes by the same author. The last such vote is current.
 ///
 /// The replay is [`holds`]. The decision is the first run that lasted [`HOLD_MS`].
-pub fn decide(votes: &[Vote], live: &[String], open_ms: u64, close_ms: u64) -> Decision {
-    holds(votes, live, open_ms, close_ms)
+pub fn decide(votes: &[Vote], open_ms: u64, close_ms: u64) -> Decision {
+    holds(votes, open_ms, close_ms)
         .into_iter()
         .find_map(|hold| decision_for(hold, close_ms))
         .unwrap_or(Decision::Undecided)
@@ -49,24 +49,24 @@ pub fn decide(votes: &[Vote], live: &[String], open_ms: u64, close_ms: u64) -> D
 
 /// Every majority run, in replay order. The filter, sort, majority test and
 /// first-colour choice are the ones [`decide`] uses.
-pub fn holds(votes: &[Vote], live: &[String], open_ms: u64, until_ms: u64) -> Vec<Hold> {
-    let authors: BTreeSet<_> = live.iter().map(String::as_str).collect();
-    let mut votes: Vec<_> = votes
+pub fn holds(votes: &[Vote], open_ms: u64, until_ms: u64) -> Vec<Hold> {
+    let votes: Vec<_> = votes
         .iter()
-        .filter(|v| {
-            authors.contains(v.author.as_str()) && open_ms <= v.at_ms && v.at_ms <= until_ms
-        })
+        .filter(|v| open_ms <= v.at_ms && v.at_ms <= until_ms)
+        .cloned()
         .collect();
-    votes.sort_by_key(|v| (v.at_ms, v.author.as_str(), v.colour));
-
-    let mut current = BTreeMap::new();
-    let mut counts: BTreeMap<Colour, usize> = BTreeMap::new();
-    let mut runs: Vec<Hold> = Vec::new();
-    for vote in votes {
-        if let Some(previous) = current.insert(vote.author.as_str(), vote.colour) {
-            *counts.entry(previous).or_default() -= 1;
+    let mut instants = BTreeSet::new();
+    for vote in &votes {
+        instants.insert(vote.at_ms);
+        if let Some(expiry) = vote.at_ms.checked_add(HOLD_MS).filter(|t| *t <= until_ms) {
+            instants.insert(expiry);
         }
-        *counts.entry(vote.colour).or_default() += 1;
+    }
+
+    let mut runs: Vec<Hold> = Vec::new();
+    for at_ms in instants {
+        let live = live_voters(&votes, open_ms, at_ms);
+        let counts = crate::tally::counts(&votes, open_ms, at_ms);
         let majority = counts
             .iter()
             .find_map(|(&colour, &count)| (count > live.len() / 2).then_some(colour));
@@ -76,12 +76,12 @@ pub fn holds(votes: &[Vote], live: &[String], open_ms: u64, until_ms: u64) -> Ve
             .map(|hold| hold.colour);
         if majority != held_colour {
             if let Some(open) = runs.last_mut().filter(|hold| hold.to_ms.is_none()) {
-                open.to_ms = Some(vote.at_ms);
+                open.to_ms = Some(at_ms);
             }
             if let Some(colour) = majority {
                 runs.push(Hold {
                     colour,
-                    from_ms: vote.at_ms,
+                    from_ms: at_ms,
                     to_ms: None,
                 });
             }
@@ -91,8 +91,8 @@ pub fn holds(votes: &[Vote], live: &[String], open_ms: u64, until_ms: u64) -> Ve
 }
 
 /// The last run of [`holds`] at `at_ms`, when that run is still open.
-pub fn holding(votes: &[Vote], live: &[String], open_ms: u64, at_ms: u64) -> Option<Hold> {
-    let last = *holds(votes, live, open_ms, at_ms).last()?;
+pub fn holding(votes: &[Vote], open_ms: u64, at_ms: u64) -> Option<Hold> {
+    let last = *holds(votes, open_ms, at_ms).last()?;
     last.to_ms.is_none().then_some(last)
 }
 
@@ -106,17 +106,28 @@ fn decision_for(hold: Hold, close_ms: u64) -> Option<Decision> {
     })
 }
 
-/// Distinct authors of votes with `open_ms <= at_ms <= close_ms`, in author order.
-///
-/// An empty window, including `open_ms > close_ms`, has no live voters.
-pub fn live_voters(votes: &[Vote], open_ms: u64, close_ms: u64) -> Vec<String> {
-    let mut authors = BTreeSet::new();
-    for vote in votes {
-        if open_ms <= vote.at_ms && vote.at_ms <= close_ms {
-            authors.insert(vote.author.clone());
-        }
+/// Authors whose newest vote in `open_ms..=at_ms` is less than [`HOLD_MS`]
+/// old, in author order. An empty or reversed window has no live voters.
+pub fn live_voters(votes: &[Vote], open_ms: u64, at_ms: u64) -> Vec<String> {
+    let mut newest: BTreeMap<&str, &Vote> = BTreeMap::new();
+    for vote in votes
+        .iter()
+        .filter(|v| open_ms <= v.at_ms && v.at_ms <= at_ms)
+    {
+        newest
+            .entry(&vote.author)
+            .and_modify(|have| {
+                if (vote.at_ms, vote.colour) > (have.at_ms, have.colour) {
+                    *have = vote;
+                }
+            })
+            .or_insert(vote);
     }
-    authors.into_iter().collect()
+    newest
+        .into_iter()
+        .filter(|(_, vote)| at_ms - vote.at_ms < HOLD_MS)
+        .map(|(author, _)| author.to_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -152,10 +163,7 @@ mod tests {
             vote("b", Blue, open),
             vote("c", Blue, open),
         ];
-        assert_eq!(
-            decide(&votes, &live(&["a", "b", "c"]), open, open + HOLD_MS),
-            blue_at(open)
-        );
+        assert_eq!(decide(&votes, open, open + HOLD_MS), blue_at(open));
     }
 
     #[test]
@@ -168,19 +176,13 @@ mod tests {
             vote("b", Red, t + HOLD_MS / 2),
             vote("b", Blue, regained),
         ];
-        assert_eq!(
-            decide(&votes, &live(&["a", "b", "c"]), 0, regained + HOLD_MS),
-            blue_at(regained)
-        );
+        assert_eq!(decide(&votes, 0, regained + HOLD_MS), blue_at(regained));
     }
 
     #[test]
     fn late_majority_cannot_finish_before_close() {
         let votes = [vote("a", Blue, HOLD_MS / 2), vote("b", Blue, HOLD_MS / 2)];
-        assert_eq!(
-            decide(&votes, &live(&["a", "b", "c"]), 0, HOLD_MS),
-            Decision::Undecided
-        );
+        assert_eq!(decide(&votes, 0, HOLD_MS), Decision::Undecided);
     }
 
     #[test]
@@ -191,10 +193,7 @@ mod tests {
             vote("c", Red, 0),
             vote("d", Red, 0),
         ];
-        assert_eq!(
-            decide(&votes, &live(&["a", "b", "c", "d"]), 0, HOLD_MS * 2),
-            Decision::Undecided
-        );
+        assert_eq!(decide(&votes, 0, HOLD_MS * 2), Decision::Undecided);
     }
 
     #[test]
@@ -207,18 +206,16 @@ mod tests {
             vote("b", Blue, 2),
             vote("a", Red, HOLD_MS + 2),
         ];
-        assert_eq!(
-            decide(&votes, &live(&["a", "b", "c"]), 1, HOLD_MS + 1),
-            blue_at(1)
-        );
-        assert_eq!(
-            decide(&[vote("outsider", Blue, 0)], &live(&["a"]), 0, HOLD_MS),
-            Decision::Undecided
-        );
+        assert_eq!(decide(&votes, 1, HOLD_MS + 1), blue_at(1));
+        assert_eq!(decide(&[vote("outsider", Blue, 0)], 0, HOLD_MS), blue_at(0));
         let replaced = [vote("a", Blue, 0), vote("a", Red, 1)];
         assert_eq!(
-            decide(&replaced, &live(&["a", "b", "c"]), 0, HOLD_MS * 2),
-            Decision::Undecided
+            decide(&replaced, 0, HOLD_MS * 2),
+            Decision::Decided {
+                colour: Red,
+                held_from_ms: 1,
+                held_to_ms: 1 + HOLD_MS
+            }
         );
     }
 
@@ -227,33 +224,22 @@ mod tests {
         let votes = [vote("a", Blue, 0), vote("a", Red, 0), vote("b", Blue, 0)];
         let mut reversed = votes.clone();
         reversed.reverse();
-        let voters = live(&["a", "b", "c"]);
-        assert_eq!(decide(&votes, &voters, 0, HOLD_MS), blue_at(0));
-        assert_eq!(
-            decide(&votes, &voters, 0, HOLD_MS),
-            decide(&reversed, &voters, 0, HOLD_MS)
-        );
+        assert_eq!(decide(&votes, 0, HOLD_MS), blue_at(0));
+        assert_eq!(decide(&votes, 0, HOLD_MS), decide(&reversed, 0, HOLD_MS));
     }
 
     #[test]
     fn records_before_open_or_after_close_cannot_create_a_decision() {
-        let voters = live(&["a", "b", "c"]);
         let before = [vote("a", Blue, 0), vote("b", Blue, 0)];
-        assert_eq!(
-            decide(&before, &voters, 1, HOLD_MS + 1),
-            Decision::Undecided
-        );
+        assert_eq!(decide(&before, 1, HOLD_MS + 1), Decision::Undecided);
         let after = [
             vote("a", Blue, HOLD_MS / 2),
             vote("b", Blue, HOLD_MS / 2),
             vote("a", Red, HOLD_MS * 2),
         ];
-        assert_eq!(decide(&after, &voters, 0, HOLD_MS), Decision::Undecided);
+        assert_eq!(decide(&after, 0, HOLD_MS), Decision::Undecided);
         let repeated = [vote("a", Blue, 0), vote("a", Blue, 1)];
-        assert_eq!(
-            decide(&repeated, &voters, 0, HOLD_MS + 1),
-            Decision::Undecided
-        );
+        assert_eq!(decide(&repeated, 0, HOLD_MS + 1), blue_at(0));
     }
 
     #[test]
@@ -263,18 +249,14 @@ mod tests {
             vote("a", Blue, HOLD_MS / 2),
             vote("a", Red, HOLD_MS),
         ];
-        assert_eq!(decide(&votes, &live(&["a"]), 0, HOLD_MS * 3), blue_at(0));
+        assert_eq!(decide(&votes, 0, HOLD_MS * 3), blue_at(0));
     }
 
     #[test]
     fn empty_and_reversed_windows_are_undecided() {
         let votes = [vote("a", Blue, 0)];
-        assert_eq!(decide(&[], &live(&["a"]), 0, HOLD_MS), Decision::Undecided);
-        assert_eq!(decide(&votes, &[], 0, HOLD_MS), Decision::Undecided);
-        assert_eq!(
-            decide(&votes, &live(&["a"]), HOLD_MS, 0),
-            Decision::Undecided
-        );
+        assert_eq!(decide(&[], 0, HOLD_MS), Decision::Undecided);
+        assert_eq!(decide(&votes, HOLD_MS, 0), Decision::Undecided);
     }
 
     #[test]
@@ -288,9 +270,9 @@ mod tests {
             vote("z", Blue, open - 1),
             vote("y", Blue, open + HOLD_MS + 1),
         ];
-        let voters = live_voters(&votes, open, open + HOLD_MS);
+        let voters = live_voters(&votes, open, open + 1);
         assert_eq!(voters, live(&["a", "b", "c"]));
-        assert_eq!(decide(&votes, &voters, open, open + HOLD_MS), blue_at(open));
+        assert_eq!(decide(&votes, open, open + HOLD_MS), blue_at(open));
     }
 
     #[test]
@@ -308,24 +290,18 @@ mod tests {
     #[test]
     fn timestamp_limit_does_not_overflow_or_shorten_a_hold() {
         let from = u64::MAX - HOLD_MS;
-        let voters = live(&["a"]);
         assert_eq!(
-            decide(&[vote("a", Blue, from)], &voters, from, u64::MAX),
+            decide(&[vote("a", Blue, from)], from, u64::MAX),
             blue_at(from)
         );
         assert_eq!(
-            decide(&[vote("a", Blue, from + 1)], &voters, from, u64::MAX),
+            decide(&[vote("a", Blue, from + 1)], from, u64::MAX),
             Decision::Undecided
         );
     }
 
-    fn first_lasting_hold(
-        votes: &[Vote],
-        live: &[String],
-        open_ms: u64,
-        close_ms: u64,
-    ) -> Decision {
-        holds(votes, live, open_ms, close_ms)
+    fn first_lasting_hold(votes: &[Vote], open_ms: u64, close_ms: u64) -> Decision {
+        holds(votes, open_ms, close_ms)
             .into_iter()
             .find(|hold| hold.to_ms.unwrap_or(close_ms) - hold.from_ms >= HOLD_MS)
             .map(|hold| Decision::Decided {
@@ -362,7 +338,6 @@ mod tests {
                     vote("b", Blue, open),
                     vote("c", Blue, open),
                 ],
-                live(&["a", "b", "c"]),
                 open,
                 open + HOLD_MS,
             ),
@@ -374,14 +349,12 @@ mod tests {
                     vote("b", Red, t + HOLD_MS / 2),
                     vote("b", Blue, regained),
                 ],
-                live(&["a", "b", "c"]),
                 0,
                 regained + HOLD_MS,
             ),
             (
                 "late majority",
                 vec![vote("a", Blue, HOLD_MS / 2), vote("b", Blue, HOLD_MS / 2)],
-                live(&["a", "b", "c"]),
                 0,
                 HOLD_MS,
             ),
@@ -393,7 +366,6 @@ mod tests {
                     vote("c", Red, 0),
                     vote("d", Red, 0),
                 ],
-                live(&["a", "b", "c", "d"]),
                 0,
                 HOLD_MS * 2,
             ),
@@ -407,36 +379,26 @@ mod tests {
                     vote("b", Blue, 2),
                     vote("a", Red, HOLD_MS + 2),
                 ],
-                live(&["a", "b", "c"]),
                 1,
                 HOLD_MS + 1,
             ),
             (
                 "outsider alone",
                 vec![vote("outsider", Blue, 0)],
-                live(&["a"]),
                 0,
                 HOLD_MS,
             ),
             (
                 "replaced vote",
                 vec![vote("a", Blue, 0), vote("a", Red, 1)],
-                live(&["a", "b", "c"]),
                 0,
                 HOLD_MS * 2,
             ),
-            ("input order", ordered, live(&["a", "b", "c"]), 0, HOLD_MS),
-            (
-                "reversed input order",
-                reversed,
-                live(&["a", "b", "c"]),
-                0,
-                HOLD_MS,
-            ),
+            ("input order", ordered, 0, HOLD_MS),
+            ("reversed input order", reversed, 0, HOLD_MS),
             (
                 "votes before open",
                 vec![vote("a", Blue, 0), vote("b", Blue, 0)],
-                live(&["a", "b", "c"]),
                 1,
                 HOLD_MS + 1,
             ),
@@ -447,14 +409,12 @@ mod tests {
                     vote("b", Blue, HOLD_MS / 2),
                     vote("a", Red, HOLD_MS * 2),
                 ],
-                live(&["a", "b", "c"]),
                 0,
                 HOLD_MS,
             ),
             (
                 "repeat by the only voter",
                 vec![vote("a", Blue, 0), vote("a", Blue, 1)],
-                live(&["a", "b", "c"]),
                 0,
                 HOLD_MS + 1,
             ),
@@ -465,51 +425,35 @@ mod tests {
                     vote("a", Blue, HOLD_MS / 2),
                     vote("a", Red, HOLD_MS),
                 ],
-                live(&["a"]),
                 0,
                 HOLD_MS * 3,
             ),
-            ("no votes", Vec::new(), live(&["a"]), 0, HOLD_MS),
-            (
-                "no live voters",
-                vec![vote("a", Blue, 0)],
-                Vec::new(),
-                0,
-                HOLD_MS,
-            ),
-            (
-                "reversed window",
-                vec![vote("a", Blue, 0)],
-                live(&["a"]),
-                HOLD_MS,
-                0,
-            ),
+            ("no votes", Vec::new(), 0, HOLD_MS),
+            ("solo voter", vec![vote("a", Blue, 0)], 0, HOLD_MS),
+            ("reversed window", vec![vote("a", Blue, 0)], HOLD_MS, 0),
             (
                 "two of three live voters",
                 archive.clone(),
-                live_voters(&archive, window, window + HOLD_MS),
                 window,
                 window + HOLD_MS,
             ),
             (
                 "hold reaches the timestamp limit",
                 vec![vote("a", Blue, from)],
-                live(&["a"]),
                 from,
                 u64::MAX,
             ),
             (
                 "hold would overflow the timestamp",
                 vec![vote("a", Blue, from + 1)],
-                live(&["a"]),
                 from,
                 u64::MAX,
             ),
         ];
-        for (name, votes, voters, open_ms, close_ms) in cases {
+        for (name, votes, open_ms, close_ms) in cases {
             assert_eq!(
-                decide(&votes, &voters, open_ms, close_ms),
-                first_lasting_hold(&votes, &voters, open_ms, close_ms),
+                decide(&votes, open_ms, close_ms),
+                first_lasting_hold(&votes, open_ms, close_ms),
                 "{name}"
             );
         }
@@ -521,7 +465,6 @@ mod tests {
         let twenty = 20 * 60 * 1000;
         let forty = 40 * 60 * 1000;
         let fifty = 50 * 60 * 1000;
-        let voters = live(&["a", "b", "c"]);
         let votes = [
             vote("a", Blue, t),
             vote("b", Blue, t),
@@ -529,7 +472,7 @@ mod tests {
             vote("b", Blue, t + forty),
         ];
         assert_eq!(
-            holds(&votes, &voters, t, t + fifty),
+            holds(&votes, t, t + fifty),
             vec![
                 Hold {
                     colour: Blue,
@@ -544,16 +487,202 @@ mod tests {
             ]
         );
         assert_eq!(
-            holding(&votes, &voters, t, t + fifty),
+            holding(&votes, t, t + fifty),
             Some(Hold {
                 colour: Blue,
                 from_ms: t + forty,
                 to_ms: None,
             })
         );
+        assert_eq!(holding(&votes, t, t + twenty + 10 * 60 * 1000), None);
+    }
+    fn at(hour: u64, minute: u64) -> u64 {
+        hour * HOLD_MS + minute * 60_000
+    }
+
+    fn run(colour: Colour, from_ms: u64, to_ms: Option<u64>) -> Hold {
+        Hold {
+            colour,
+            from_ms,
+            to_ms,
+        }
+    }
+
+    #[test]
+    fn live_voters_and_counts_expire_at_exactly_one_hour() {
+        let votes = [vote("a", Red, at(10, 0)), vote("b", Blue, at(10, 30))];
+        for (time, authors) in [
+            (at(10, 59), live(&["a", "b"])),
+            (at(11, 0), live(&["b"])),
+            (at(11, 1), live(&["b"])),
+            (at(11, 30), live(&[])),
+        ] {
+            assert_eq!(live_voters(&votes, 0, time), authors);
+        }
         assert_eq!(
-            holding(&votes, &voters, t, t + twenty + 10 * 60 * 1000),
-            None
+            crate::tally::counts(&votes, 0, at(10, 59)),
+            BTreeMap::from([(Blue, 1), (Red, 1)])
         );
+        assert_eq!(
+            crate::tally::counts(&votes, 0, at(11, 1)),
+            BTreeMap::from([(Blue, 1)])
+        );
+        let mut returned = votes.to_vec();
+        returned.push(vote("a", Red, at(11, 2)));
+        assert_eq!(live_voters(&returned, 0, at(11, 2)), live(&["a", "b"]));
+    }
+
+    fn expiry_keeps_fixture() -> Vec<Vote> {
+        vec![
+            vote("e", Red, at(9, 30)),
+            vote("f", Red, at(9, 30)),
+            vote("a", Blue, at(10, 0)),
+            vote("b", Blue, at(10, 0)),
+            vote("c", Blue, at(10, 0)),
+            vote("d", Blue, at(10, 0)),
+        ]
+    }
+
+    #[test]
+    fn expiry_keeps_a_hold_when_the_majority_colour_stays_the_same() {
+        let votes = expiry_keeps_fixture();
+        assert_eq!(
+            holds(&votes, 0, at(10, 50)),
+            vec![
+                run(Red, at(9, 30), Some(at(10, 0))),
+                run(Blue, at(10, 0), None)
+            ]
+        );
+        assert_eq!(
+            live_voters(&votes, 0, at(10, 30)),
+            live(&["a", "b", "c", "d"])
+        );
+        assert_eq!(
+            crate::tally::counts(&votes, 0, at(10, 30)),
+            BTreeMap::from([(Blue, 4)])
+        );
+        assert_eq!(decide(&votes, 0, at(11, 0)), blue_at(at(10, 0)));
+    }
+
+    #[test]
+    fn expiry_can_end_or_start_a_hold_without_a_vote() {
+        let votes = [
+            vote("a", Blue, at(9, 20)),
+            vote("c", Red, at(9, 50)),
+            vote("b", Blue, at(10, 0)),
+        ];
+        assert_eq!(
+            holds(&votes, 0, at(10, 50)),
+            vec![
+                run(Blue, at(9, 20), Some(at(9, 50))),
+                run(Blue, at(10, 0), Some(at(10, 20))),
+                run(Blue, at(10, 50), None)
+            ]
+        );
+        assert_eq!(
+            holding(&votes, 0, at(10, 19)),
+            Some(run(Blue, at(10, 0), None))
+        );
+        assert_eq!(holding(&votes, 0, at(10, 20)), None);
+        let votes = [
+            vote("a", Blue, at(9, 20)),
+            vote("b", Blue, at(9, 20)),
+            vote("c", Blue, at(10, 0)),
+            vote("d", Red, at(10, 0)),
+            vote("e", Red, at(10, 0)),
+        ];
+        assert_eq!(
+            holds(&votes, 0, at(10, 50)),
+            vec![
+                run(Blue, at(9, 20), Some(at(10, 20))),
+                run(Red, at(10, 20), None)
+            ]
+        );
+        assert_eq!(decide(&votes, 0, at(23, 0)), blue_at(at(9, 20)));
+    }
+
+    fn first_day_fixture() -> Vec<Vote> {
+        use Colour::Black;
+        [
+            ("corncrake", Blue, 13, 38),
+            ("corncrake", Black, 13, 42),
+            ("corncrake", Black, 14, 20),
+            ("corncrake", Blue, 14, 51),
+            ("corncrake", Blue, 15, 28),
+            ("avocet", Blue, 14, 37),
+            ("avocet", Blue, 15, 30),
+            ("avocet", Blue, 16, 28),
+            ("whimbrel", Blue, 15, 40),
+            ("whimbrel", Blue, 16, 36),
+            ("whimbrel", Blue, 17, 28),
+            ("nightingale", Black, 16, 40),
+            ("nightingale", Black, 17, 20),
+            ("nightingale", Blue, 17, 50),
+            ("nightingale", Blue, 18, 28),
+            ("heron", Black, 18, 34),
+            ("heron", Black, 18, 40),
+            ("heron", Blue, 18, 47),
+            ("heron", Blue, 19, 38),
+            ("shrike", Blue, 19, 38),
+        ]
+        .into_iter()
+        .map(|(author, colour, hour, minute)| vote(author, colour, at(hour, minute)))
+        .collect()
+    }
+
+    #[test]
+    fn first_day_decides_with_only_the_voters_live_at_each_instant() {
+        let votes = first_day_fixture();
+        assert_eq!(decide(&votes, 0, at(23, 0)), blue_at(at(14, 51)));
+        assert_eq!(
+            holds(&votes, 0, at(23, 0)),
+            vec![
+                run(Blue, at(13, 38), Some(at(13, 42))),
+                run(Colour::Black, at(13, 42), Some(at(14, 37))),
+                run(Blue, at(14, 51), Some(at(17, 28))),
+                run(Blue, at(17, 50), Some(at(18, 34))),
+                run(Blue, at(18, 47), Some(at(20, 38))),
+            ]
+        );
+        assert_eq!(
+            live_voters(&votes, 0, at(15, 51)),
+            live(&["avocet", "corncrake", "whimbrel"])
+        );
+        assert_eq!(
+            live_voters(&votes, 0, at(17, 50)),
+            live(&["nightingale", "whimbrel"])
+        );
+        assert_eq!(
+            live_voters(&votes, 0, at(19, 38)),
+            live(&["heron", "shrike"])
+        );
+    }
+
+    #[test]
+    fn vote_and_expiry_replay_is_independent_of_input_order() {
+        for votes in [expiry_keeps_fixture(), first_day_fixture()] {
+            let expected = (decide(&votes, 0, at(23, 0)), holds(&votes, 0, at(23, 0)));
+            let mut reversed = votes.clone();
+            reversed.reverse();
+            assert_eq!(
+                (
+                    decide(&reversed, 0, at(23, 0)),
+                    holds(&reversed, 0, at(23, 0))
+                ),
+                expected
+            );
+            for shift in [1, 3, 7] {
+                let mut rotated = votes.clone();
+                let len = rotated.len();
+                rotated.rotate_left(shift % len);
+                assert_eq!(
+                    (
+                        decide(&rotated, 0, at(23, 0)),
+                        holds(&rotated, 0, at(23, 0))
+                    ),
+                    expected
+                );
+            }
+        }
     }
 }
