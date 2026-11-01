@@ -7,7 +7,7 @@ use crate::closing::{
 };
 use crate::colour::Colour;
 use crate::day::{Day, utc_time};
-use crate::evidence::{Evidence, SUNRISE_HOST, WIKIMEDIA_HOST};
+use crate::evidence::{Allowlist, Evidence};
 use crate::tally::{
     ARGUE_LABEL_RULE, ARGUMENTS_RULE, CITATIONS_RULE, COUNTS_RULE, CURRENT_VOTES_RULE,
     FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations, counts, live_votes, trails,
@@ -465,7 +465,7 @@ fn push_facts(out: &mut String, page: &DayPage<'_>) {
     out.push_str(
         "<section class=\"side\" aria-labelledby=\"facts-h\"><h2 id=\"facts-h\">Today\u{2019}s facts</h2>\n",
     );
-    out.push_str("<p style=\"font-size:15px\">What the peers fetched. Each can afford three fetches per activation, from two sources.</p>");
+    out.push_str("<p style=\"font-size:15px\">What the peers fetched. Each can afford three fetches per activation, from five lists.</p>");
     out.push_str(&formula(CITATIONS_RULE));
     for group in groups.iter().take(FACTS_SHOWN) {
         let first = group.records[0];
@@ -560,12 +560,14 @@ fn cited_phrase(count: usize) -> String {
     }
 }
 
-fn source_label(evidence: &Evidence) -> &str {
-    match evidence.url().host_str() {
-        Some(host) if host == WIKIMEDIA_HOST => "Wikimedia · On this day",
-        Some(host) if host == SUNRISE_HOST => "sunrise-sunset.org · London",
-        Some(host) => host,
-        None => "source",
+pub(super) fn source_label(evidence: &Evidence) -> &str {
+    match Allowlist::list(evidence.url()) {
+        Some("events") => "Wikipedia · Events",
+        Some("births") => "Wikipedia · Births",
+        Some("deaths") => "Wikipedia · Deaths",
+        Some("holidays") => "Wikipedia · Holidays",
+        Some("selected") => "Wikipedia · Selected",
+        _ => evidence.url().host_str().unwrap_or("source"),
     }
 }
 
@@ -1305,7 +1307,7 @@ mod tests {
 
         let cited = sourced(
             "ada",
-            "https://api.wikimedia.org/on-this-day",
+            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26",
             at(10, 0),
             "cited-excerpt",
         );
@@ -1367,7 +1369,7 @@ mod tests {
     fn facts_formula_is_a_direct_child_of_the_side_section() {
         let records = [sourced(
             "peer-a",
-            "https://api.wikimedia.org/on-this-day",
+            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26",
             0,
             "a fetched fact",
         )];
@@ -1386,7 +1388,7 @@ mod tests {
     fn fact_cards_keep_excerpt_lines_and_escape_record_and_tile_text() {
         let record = sourced(
             "peer<&",
-            "https://api.wikimedia.org/on-this-day",
+            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26",
             0,
             "first <line>\nsecond & line",
         );
@@ -1404,7 +1406,7 @@ mod tests {
         ));
         assert!(html.contains(&format!("<article class=\"card fact\" id=\"fact-{id}\">")));
         assert!(html.contains(&format!(
-            "<div class=\"meta\"><span>Wikimedia · On this day</span><span>ev {}</span></div>",
+            "<div class=\"meta\"><span>Wikipedia · Events</span><span>ev {}</span></div>",
             &id[..8]
         )));
         assert!(html.contains("<p class=\"excerpt\">first &lt;line&gt;\nsecond &amp; line</p>"));
@@ -1423,17 +1425,64 @@ mod tests {
     }
 
     #[test]
+    fn facts_label_each_list_and_preserve_host_fallbacks() {
+        let cases = [
+            ("events", "Wikipedia · Events"),
+            ("births", "Wikipedia · Births"),
+            ("deaths", "Wikipedia · Deaths"),
+            ("holidays", "Wikipedia · Holidays"),
+            ("selected", "Wikipedia · Selected"),
+            ("all", "api.wikimedia.org"),
+        ];
+        let mut records: Vec<_> = cases
+            .iter()
+            .map(|(list, _)| {
+                sourced(
+                    "ada",
+                    &format!(
+                        "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/{list}/10/26"
+                    ),
+                    0,
+                    list,
+                )
+            })
+            .collect();
+        records.push(sourced("ada", "https://example.com/fact", 0, "other"));
+        records.push(sourced("ada", "data:text/plain,fact", 0, "hostless"));
+        let html = render_front(&page(&[], &[], &records, None, Paint::NoRecord));
+        for (fact, label) in records.iter().zip(
+            cases
+                .iter()
+                .map(|(_, label)| *label)
+                .chain(["example.com", "source"]),
+        ) {
+            let marker = format!("<article class=\"card fact\" id=\"fact-{}\"", fact.id().0);
+            let article = html
+                .split_once(&marker)
+                .unwrap()
+                .1
+                .split_once("</article>")
+                .unwrap()
+                .0;
+            assert!(article.contains(label), "{label}");
+        }
+        assert!(html.contains(
+            "What the peers fetched. Each can afford three fetches per activation, from five lists."
+        ));
+    }
+
+    #[test]
     fn one_digest_is_one_card_and_thirteen_facts_link_the_rest() {
         let peer_names = names(&[("ada", "Wren"), ("bea", "Robin")]);
         let left = sourced(
             "ada",
-            "https://api.wikimedia.org/on-this-day",
+            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26",
             10,
             "shared-excerpt",
         );
         let right = sourced(
             "bea",
-            "https://api.sunrise-sunset.org/json",
+            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/births/10/26",
             20,
             "shared-excerpt",
         );
@@ -1454,7 +1503,7 @@ mod tests {
         assert_eq!(html.matches("shared-excerpt").count(), 1);
         assert!(html.contains("fetched by Wren, Robin"));
         assert!(html.contains("cited 2 times"));
-        assert!(html.contains("Wikimedia · On this day"));
+        assert!(html.contains("Wikipedia · Events"));
         assert_eq!(html.matches("id=\"fact-").count(), 2);
         assert!(!html.contains("All 2 facts"));
         assert_clean(&html);
@@ -1462,9 +1511,9 @@ mod tests {
         let mut many = Vec::new();
         for index in 0..13 {
             let url = if index % 2 == 0 {
-                "https://api.wikimedia.org/on-this-day"
+                "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26"
             } else {
-                "https://api.sunrise-sunset.org/json"
+                "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/births/10/26"
             };
             many.push(sourced(
                 "ada",
@@ -1481,7 +1530,7 @@ mod tests {
         assert!(!broad.contains("distinct-excerpt-12"));
         assert!(broad.contains("All 13 facts"));
         assert!(broad.contains("href=\"days/1970-01-01.html\""));
-        assert!(broad.contains("sunrise-sunset.org · London"));
+        assert!(broad.contains("Wikipedia · Births"));
         assert!(broad.contains("not cited"));
         assert_clean(&broad);
     }

@@ -1,13 +1,13 @@
-//! Bounded fetched data and the two owner-approved JSON source shapes.
+//! Bounded fetched data from five allowlisted lists on one host.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-// Q-20261023-xuav: two JSON APIs, no HTML, at most 600 characters per excerpt.
+// ADR-0271 §5: Wikipedia's five lists for the date, whole lines up to 600 characters.
 pub const EXCERPT_CHARS: usize = 600;
 pub const WIKIMEDIA_HOST: &str = "api.wikimedia.org";
-pub const SUNRISE_HOST: &str = "api.sunrise-sunset.org";
+pub const LISTS: [&str; 5] = ["events", "births", "deaths", "holidays", "selected"];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -40,7 +40,7 @@ impl Evidence {
             url,
             fetched_at_ms,
             sha256,
-            excerpt: text.chars().take(EXCERPT_CHARS).collect(),
+            excerpt: excerpt(text),
         }
     }
 
@@ -71,6 +71,23 @@ impl Evidence {
     pub fn excerpt(&self) -> &str {
         &self.excerpt
     }
+}
+
+fn excerpt(text: &str) -> String {
+    let mut kept = Vec::new();
+    let mut chars = 0;
+    for line in text.split('\n') {
+        let next = chars + usize::from(!kept.is_empty()) + line.chars().count();
+        if next > EXCERPT_CHARS {
+            if kept.is_empty() {
+                return line.chars().take(EXCERPT_CHARS - 1).chain(['…']).collect();
+            }
+            break;
+        }
+        kept.push(line);
+        chars = next;
+    }
+    kept.join("\n")
 }
 
 /// Length-prefix the tuple so field boundaries cannot collide.
@@ -135,37 +152,37 @@ pub struct Allowlist;
 
 impl Allowlist {
     pub fn permits(url: &Url) -> bool {
+        Self::list(url).is_some()
+    }
+
+    pub fn list(url: &Url) -> Option<&'static str> {
         if url.scheme() != "https"
             || !url.username().is_empty()
             || url.password().is_some()
             || url.fragment().is_some()
             || url.port().is_some()
+            || url.query().is_some()
+            || url.host_str() != Some(WIKIMEDIA_HOST)
         {
-            return false;
+            return None;
         }
-        match url.host_str() {
-            Some(WIKIMEDIA_HOST) => {
-                url.query().is_none()
-                    && url
-                        .path()
-                        .strip_prefix("/feed/v1/wikipedia/en/onthisday/all/")
-                        .is_some_and(|date| {
-                            date.len() == 5
-                                && date.as_bytes()[2] == b'/'
-                                && valid_date(&format!("2000-{}-{}", &date[..2], &date[3..]))
-                        })
-            }
-            Some(SUNRISE_HOST) => {
-                url.path() == "/json"
-                    && url.query().is_some_and(|query| {
-                        query
-                            .strip_prefix("lat=51.5074&lng=-0.1278&date=")
-                            .and_then(|rest| rest.strip_suffix("&formatted=0"))
-                            .is_some_and(valid_date)
-                    })
-            }
-            _ => false,
+        let rest = url
+            .path()
+            .strip_prefix("/feed/v1/wikipedia/en/onthisday/")?;
+        let (list, date) = rest.split_once('/')?;
+        let list = LISTS.into_iter().find(|known| *known == list)?;
+        let bytes = date.as_bytes();
+        if bytes.len() != 5
+            || bytes[2] != b'/'
+            || !bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| i == 2 || b.is_ascii_digit())
+            || !valid_date(&format!("2000-{}-{}", &date[..2], &date[3..]))
+        {
+            return None;
         }
+        Some(list)
     }
 }
 
@@ -206,19 +223,21 @@ fn valid_date(date: &str) -> bool {
 mod tests {
     use super::*;
 
-    const WIKI: &str = "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/10/23";
+    const WIKI: &str = "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/23";
     const SUN: &str =
         "https://api.sunrise-sunset.org/json?lat=51.5074&lng=-0.1278&date=2026-10-23&formatted=0";
 
     #[test]
-    fn permits_only_the_two_exact_source_shapes() {
-        for url in [
-            WIKI,
-            SUN,
-            "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/02/29",
-            "https://api.sunrise-sunset.org/json?lat=51.5074&lng=-0.1278&date=2024-02-29&formatted=0",
-        ] {
-            assert!(Allowlist::permits(&Url::parse(url).unwrap()), "{url}");
+    fn permits_only_the_five_exact_list_shapes() {
+        for list in LISTS {
+            for date in ["10/23", "02/29"] {
+                let url = Url::parse(&format!(
+                    "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/{list}/{date}"
+                ))
+                .unwrap();
+                assert!(Allowlist::permits(&url), "{url}");
+                assert_eq!(Allowlist::list(&url), Some(list));
+            }
         }
         for url in [
             WIKI.replace("api.wikimedia.org", "example.com"),
@@ -228,7 +247,11 @@ mod tests {
             WIKI.replace("https://", "https://reader@"),
             WIKI.replace("https://", "https://:password@"),
             WIKI.replace(".org/", ".org:444/"),
-            WIKI.replace("/all/", "/births/"),
+            WIKI.replace("/events/", "/all/"),
+            WIKI.replace("/events/", "/Events/"),
+            WIKI.replace("/events/", "/unknown/"),
+            SUN.to_owned(),
+            SUN.replace("2026-10-23", "2024-02-29"),
             WIKI.replace("/en/", "/de/"),
             WIKI.replace("10/23", "1/23"),
             WIKI.replace("10/23", "10-23"),
@@ -272,6 +295,7 @@ mod tests {
         let text = format!("{}tail", "🦜".repeat(EXCERPT_CHARS));
         let record = evidence("a", "run", WIKI, 0, &text);
         assert_eq!(record.excerpt().chars().count(), EXCERPT_CHARS);
+        assert_eq!(record.excerpt(), format!("{}…", "🦜".repeat(599)));
         assert_eq!(
             record.sha256(),
             format!("{:x}", Sha256::digest(text.as_bytes()))
@@ -293,6 +317,43 @@ mod tests {
             evidence("a", "run", WIKI, 1, "abc").sha256(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn excerpts_keep_whole_lines_and_the_full_digest() {
+        let line = "x".repeat(100);
+        let seven = [line.as_str(); 7].join("\n");
+        for (text, expected) in [
+            (seven, [line.as_str(); 5].join("\n")),
+            ("x".repeat(700), format!("{}…", "x".repeat(599))),
+            ("🦜".repeat(600), "🦜".repeat(600)),
+            ("one\ntwo".into(), "one\ntwo".into()),
+            (String::new(), String::new()),
+        ] {
+            let record = evidence("a", "run", WIKI, 0, &text);
+            assert_eq!(record.excerpt(), expected);
+            assert!(record.excerpt().chars().count() <= EXCERPT_CHARS);
+            assert_eq!(
+                record.sha256(),
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            );
+        }
+    }
+
+    #[test]
+    fn deserialization_rejects_former_sources_but_accepts_old_excerpt_bound() {
+        for url in [WIKI.replace("/events/", "/all/"), SUN.to_owned()] {
+            let record = evidence("a", "run", &url, 0, "old");
+            let error = serde_json::from_value::<Evidence>(serde_json::to_value(record).unwrap())
+                .unwrap_err();
+            assert!(error.to_string().contains("url is outside the allowlist"));
+        }
+        let record = evidence("a", "run", WIKI, 0, "short");
+        let mut value = serde_json::to_value(record).unwrap();
+        // Older writers could stop in the middle of a line. The stored bound stands.
+        value["excerpt"] = serde_json::json!("🦜".repeat(600));
+        let recovered: Evidence = serde_json::from_value(value).unwrap();
+        assert_eq!(recovered.excerpt(), "🦜".repeat(600));
     }
 
     #[test]

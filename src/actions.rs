@@ -191,7 +191,7 @@ pub fn seed_offset(peer_id: &str, choices: usize) -> usize {
 mod tests {
     use super::*;
 
-    const WIKI: &str = "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/10/23";
+    const WIKI: &str = "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/23";
 
     fn context(evidence: &[Evidence], fetches: usize) -> Context<'_> {
         Context {
