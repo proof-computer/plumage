@@ -83,11 +83,18 @@ async fn completion(State(palette): State<Palette>, Json(request): Json<Value>) 
     let id = prompt.first().and_then(Value::as_i64).unwrap_or(0) as i32;
     let messages = prompt.get(1).and_then(Value::as_i64).unwrap_or(0);
     let you = decode_peer(id).unwrap_or_else(|| "p00".to_owned());
+    let colour = if palette.lab {
+        if you == "p02" { "red" } else { "blue" }
+    } else {
+        colour_for(&you)
+    };
     let action = if messages <= 2 {
         let day_number = prompt.get(2).and_then(Value::as_u64).expect("day number");
         let day = plumage::day::Day::from_ms(day_number * 86_400_000);
         json!({"action": "fetch", "url": plumage::fetch::sources(&day, &you)[0]})
     } else if messages == 4 {
+        json!({"action":"stance","prefer":[colour],"accept":[],"refuse":[],"cites":[]})
+    } else if messages == 6 {
         let text = if palette.lab {
             format!("argument from {you}")
         } else {
@@ -95,11 +102,6 @@ async fn completion(State(palette): State<Palette>, Json(request): Json<Value>) 
         };
         json!({"action":"argue","text": text, "cites":[]})
     } else {
-        let colour = if palette.lab {
-            if you == "p02" { "red" } else { "blue" }
-        } else {
-            colour_for(&you)
-        };
         json!({"action":"vote","colour": colour})
     };
     Json(json!({

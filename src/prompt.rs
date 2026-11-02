@@ -101,16 +101,17 @@ pub fn schema_for(day: &Day, peer_id: &str) -> Value {
     schema
 }
 
-/// Whether this peer has read and argued in the day's ledger.
+/// Whether this peer has read, declared a stance and argued in the day's ledger.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VoteGate {
     pub fetched: bool,
+    pub stanced: bool,
     pub argued: bool,
 }
 
 impl VoteGate {
     pub fn may_vote(&self) -> bool {
-        self.fetched && self.argued
+        self.fetched && self.stanced && self.argued
     }
 }
 
@@ -120,6 +121,7 @@ pub fn vote_gate(index: &DayIndex, author: &str, run: &str) -> VoteGate {
             .evidence
             .values()
             .any(|(_, evidence)| evidence.author() == author && evidence.run() == run),
+        stanced: index.stances.contains_key(author),
         argued: index
             .arguments
             .iter()
@@ -127,16 +129,28 @@ pub fn vote_gate(index: &DayIndex, author: &str, run: &str) -> VoteGate {
     }
 }
 
-/// Withhold the vote choice until the peer has read and argued.
-pub fn schema_allowing(day: &Day, peer_id: &str, may_vote: bool) -> Value {
+/// Withhold votes until ready, then offer only the current stance's choices.
+pub fn schema_allowing(day: &Day, peer_id: &str, votes: Option<&[Colour]>) -> Value {
     let mut schema = schema_for(day, peer_id);
-    if !may_vote && let Some(choices) = schema.get_mut("oneOf").and_then(Value::as_array_mut) {
-        choices.retain(|choice| {
-            choice
-                .pointer("/properties/action/const")
-                .and_then(Value::as_str)
-                != Some("vote")
-        });
+    if let Some(choices) = schema.get_mut("oneOf").and_then(Value::as_array_mut) {
+        if let Some(colours) = votes {
+            for choice in choices {
+                if choice
+                    .pointer("/properties/action/const")
+                    .and_then(Value::as_str)
+                    == Some("vote")
+                {
+                    choice["properties"]["colour"] = json!({"type": "string", "enum": colours.iter().map(|c| c.name()).collect::<Vec<_>>()});
+                }
+            }
+        } else {
+            choices.retain(|choice| {
+                choice
+                    .pointer("/properties/action/const")
+                    .and_then(Value::as_str)
+                    != Some("vote")
+            });
+        }
     }
     schema
 }
@@ -232,6 +246,7 @@ mod tests {
         let index = DayIndex::default();
         let gate = VoteGate {
             fetched: false,
+            stanced: true,
             argued: false,
         };
         for (peer, edition) in [("p00", "en"), ("p01", "fr")] {
@@ -289,6 +304,7 @@ mod tests {
         }
         let gate = VoteGate {
             fetched: false,
+            stanced: true,
             argued: true,
         };
         let value = context(&day, &clock, "p00", &index, 2, gate);
@@ -348,6 +364,7 @@ mod tests {
             (
                 VoteGate {
                     fetched: false,
+                    stanced: true,
                     argued: false,
                 },
                 json!(["fetch", "argue"]),
@@ -355,6 +372,7 @@ mod tests {
             (
                 VoteGate {
                     fetched: true,
+                    stanced: true,
                     argued: false,
                 },
                 json!(["argue"]),
@@ -362,6 +380,7 @@ mod tests {
             (
                 VoteGate {
                     fetched: false,
+                    stanced: true,
                     argued: true,
                 },
                 json!(["fetch"]),
@@ -369,6 +388,7 @@ mod tests {
             (
                 VoteGate {
                     fetched: true,
+                    stanced: true,
                     argued: true,
                 },
                 json!([]),
@@ -430,16 +450,16 @@ mod tests {
     #[test]
     fn schema_withholds_only_vote_until_allowed() {
         let fixed = schema_for(&day(), "p01");
-        assert_eq!(schema_allowing(&day(), "p01", true), fixed);
-        let narrowed = schema_allowing(&day(), "p01", false);
+        assert_eq!(schema_allowing(&day(), "p01", Some(&Colour::ALL)), fixed);
+        let narrowed = schema_allowing(&day(), "p01", None);
         let choices = narrowed["oneOf"].as_array().unwrap();
-        assert_eq!(choices.len(), 2);
+        assert_eq!(choices.len(), 3);
         assert!(
             choices
                 .iter()
                 .all(|choice| choice["properties"]["action"]["const"] != "vote")
         );
-        assert_eq!(choices, &fixed["oneOf"].as_array().unwrap()[..2]);
+        assert_eq!(choices, &fixed["oneOf"].as_array().unwrap()[..3]);
     }
 
     #[test]
@@ -457,6 +477,18 @@ mod tests {
                 .evidence
                 .insert(evidence.id().0.clone(), ("record".into(), evidence));
             assert!(!vote_gate(&index, "p00", "today").may_vote());
+            index.stances.insert(
+                "p00".into(),
+                crate::tally::Stance {
+                    id: "stance".into(),
+                    author: "p00".into(),
+                    at_ms: 0,
+                    prefer: vec![Colour::Blue],
+                    accept: vec![],
+                    refuse: vec![],
+                    cites: vec![],
+                },
+            );
             for arg_author in ["p01", "p00"] {
                 index.arguments.push(Argument {
                     id: format!("argument-{arg_author}"),
@@ -506,6 +538,7 @@ mod tests {
             };
             let gate = VoteGate {
                 fetched: false,
+                stanced: true,
                 argued: false,
             };
             let value = context(&day, &clock, "p00", &DayIndex::default(), 3, gate);
@@ -532,5 +565,56 @@ mod tests {
             }
             assert_eq!(value.as_object().unwrap().len(), 14);
         }
+    }
+
+    #[test]
+    fn stance_gate_and_ordered_vote_choices_share_one_predicate() {
+        let fixed = schema_for(&day(), "p00");
+        let narrowed = schema_allowing(&day(), "p00", Some(&[Colour::Blue, Colour::Teal]));
+        assert_eq!(
+            &narrowed["oneOf"].as_array().unwrap()[..3],
+            &fixed["oneOf"].as_array().unwrap()[..3]
+        );
+        assert_eq!(
+            narrowed["oneOf"][3]["properties"]["colour"]["enum"],
+            json!(["blue", "teal"])
+        );
+        let clock = DayClock {
+            real_start_ms: u64::MAX,
+            sim_start_ms: day().open_ms(),
+            speed: 1,
+        };
+        for fetched in [false, true] {
+            for stanced in [false, true] {
+                for argued in [false, true] {
+                    let gate = VoteGate {
+                        fetched,
+                        stanced,
+                        argued,
+                    };
+                    assert_eq!(gate.may_vote(), fetched && stanced && argued);
+                    assert_eq!(
+                        context(&day(), &clock, "p00", &DayIndex::default(), 3, gate)["may_vote"],
+                        gate.may_vote()
+                    );
+                }
+            }
+        }
+        let mut index = DayIndex::default();
+        assert!(!vote_gate(&index, "p00", "today").stanced);
+        index.stances.insert(
+            "p00".into(),
+            crate::tally::Stance {
+                id: "s".into(),
+                author: "p00".into(),
+                at_ms: 0,
+                prefer: vec![Colour::Blue],
+                accept: vec![],
+                refuse: vec![],
+                cites: vec![],
+            },
+        );
+        assert!(vote_gate(&index, "p00", "today").stanced);
+        assert!(!vote_gate(&index, "p01", "today").stanced);
     }
 }

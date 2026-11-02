@@ -1,6 +1,9 @@
 //! Plumage's records on the generic store envelope.
 
-use crate::actions::{ARGUMENT_CHARS, Action, MAX_CITATIONS};
+use crate::actions::{
+    ARGUMENT_CHARS, Action, MAX_CITATIONS, STANCE_ACCEPT_MAX, STANCE_PREFER_MAX, STANCE_PREFER_MIN,
+    STANCE_REFUSE_MAX,
+};
 use crate::evidence::{Allowlist, Evidence};
 use forthebirds_store::{ActionRecord, AppAction, EvidenceRecord, LedgerRecord, check_record};
 use serde::{Deserialize, Serialize};
@@ -8,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA: u32 = 1;
 /// An argue that names `reply_to`. Every other record stays at [`SCHEMA`].
 pub const REPLY_SCHEMA: u32 = 2;
+/// A stance. Every other record stays at [`SCHEMA`] or [`REPLY_SCHEMA`].
+pub const STANCE_SCHEMA: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(
@@ -104,6 +109,40 @@ impl AppAction for Action {
                     ));
                 }
             }
+            Action::Stance {
+                prefer,
+                accept,
+                refuse,
+                cites,
+            } => {
+                let invalid = |message| forthebirds_store::Error::new("invalid_action", message);
+                if !(STANCE_PREFER_MIN..=STANCE_PREFER_MAX).contains(&prefer.len())
+                    || accept.len() > STANCE_ACCEPT_MAX
+                    || refuse.len() > STANCE_REFUSE_MAX
+                {
+                    return Err(invalid(
+                        "stance prefer needs 1 to 3 colours, accept at most 4, refuse at most 3",
+                    ));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                if prefer
+                    .iter()
+                    .chain(accept)
+                    .chain(refuse)
+                    .any(|colour| !seen.insert(colour))
+                {
+                    return Err(invalid("stance names a colour more than once"));
+                }
+                if cites.len() > MAX_CITATIONS {
+                    return Err(invalid("stance cites more than 8 evidence records"));
+                }
+                if !refuse.is_empty() && cites.is_empty() {
+                    return Err(invalid("stance refusal cites no evidence"));
+                }
+                if cites.iter().any(|id| !is_lower_hex(&id.0, 64)) {
+                    return Err(invalid("citation must be 64 lowercase hex digits"));
+                }
+            }
             Action::Vote { .. } => {}
         }
         Ok(())
@@ -111,7 +150,9 @@ impl AppAction for Action {
 
     fn evidence_ids(&self) -> Vec<&str> {
         match self {
-            Action::Argue { cites, .. } => cites.iter().map(|id| id.0.as_str()).collect(),
+            Action::Argue { cites, .. } | Action::Stance { cites, .. } => {
+                cites.iter().map(|id| id.0.as_str()).collect()
+            }
             Action::Fetch { .. } | Action::Vote { .. } => Vec::new(),
         }
     }
@@ -120,6 +161,7 @@ impl AppAction for Action {
         match self {
             Action::Fetch { .. } => "fetch",
             Action::Argue { .. } => "argue",
+            Action::Stance { .. } => "stance",
             Action::Vote { .. } => "vote",
         }
     }
@@ -131,7 +173,7 @@ impl AppAction for Action {
 
 impl LedgerRecord for Record {
     const APP: &'static str = "plumage";
-    const MAX_KNOWN_SCHEMA: u32 = 2;
+    const MAX_KNOWN_SCHEMA: u32 = 3;
 
     fn id(&self) -> &str {
         match self {
@@ -165,7 +207,13 @@ impl LedgerRecord for Record {
                         ..
                     }
                 );
-                let expected = if reply { REPLY_SCHEMA } else { SCHEMA };
+                let expected = if matches!(record.action, Action::Stance { .. }) {
+                    STANCE_SCHEMA
+                } else if reply {
+                    REPLY_SCHEMA
+                } else {
+                    SCHEMA
+                };
                 if record.schema != expected {
                     return Err(forthebirds_store::Error::new(
                         "invalid",
@@ -267,7 +315,7 @@ mod tests {
         assert_eq!(good["kind"], "action");
         assert!(good["data"].is_object());
         assert_eq!(good["data"]["schema"], 1);
-        let skipped = json!({"kind": "evidence", "data": {"schema": 3}});
+        let skipped = json!({"kind": "evidence", "data": {"schema": 4}});
         let page = json!({
             "database_id": "db-1",
             "records": [good, skipped],
@@ -382,5 +430,123 @@ mod tests {
         let old: ChangesPage<OldPeer> = serde_json::from_value(page).unwrap();
         assert_eq!(old.records.len(), 1);
         assert_eq!(old.records[0].id(), kept.id());
+    }
+
+    fn stance_action() -> Action {
+        Action::Stance {
+            prefer: vec![Colour::Blue],
+            accept: vec![],
+            refuse: vec![Colour::Red],
+            cites: vec![crate::evidence::EvidenceId("ab".repeat(32))],
+        }
+    }
+
+    fn stance_record(action: Action, schema: u32) -> Record {
+        let Record::Action(mut record) = vote_record() else {
+            unreachable!()
+        };
+        record.action = action;
+        record.id = action_id(&record.run_id, &record.author, &record.operation_id);
+        record.schema = schema;
+        Record::Action(record)
+    }
+
+    #[test]
+    fn stance_schema_and_shape_are_validated_before_storage() {
+        let action = stance_action();
+        assert_eq!(action.kind(), "stance");
+        assert!(!action.is_content());
+        assert_eq!(action.evidence_ids(), vec!["ab".repeat(32).as_str()]);
+        stance_record(action.clone(), STANCE_SCHEMA)
+            .validate("run-1")
+            .unwrap();
+        assert_eq!(
+            stance_record(action.clone(), SCHEMA)
+                .validate("run-1")
+                .unwrap_err()
+                .code,
+            "invalid"
+        );
+        let Record::Action(vote) = vote_record() else {
+            unreachable!()
+        };
+        assert_eq!(
+            stance_record(vote.action, STANCE_SCHEMA)
+                .validate("run-1")
+                .unwrap_err()
+                .code,
+            "invalid"
+        );
+        for (field, value, message) in [
+            (
+                "prefer",
+                json!([]),
+                "stance prefer needs 1 to 3 colours, accept at most 4, refuse at most 3",
+            ),
+            (
+                "accept",
+                json!(["blue"]),
+                "stance names a colour more than once",
+            ),
+            ("cites", json!([]), "stance refusal cites no evidence"),
+            (
+                "cites",
+                json!(["a".repeat(63)]),
+                "citation must be 64 lowercase hex digits",
+            ),
+            (
+                "cites",
+                json!(vec!["ab".repeat(32); 9]),
+                "stance cites more than 8 evidence records",
+            ),
+        ] {
+            let mut value_action = serde_json::to_value(&action).unwrap();
+            value_action[field] = value;
+            let error = stance_record(serde_json::from_value(value_action).unwrap(), STANCE_SCHEMA)
+                .validate("run-1")
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_action");
+            assert_eq!(error.message, message);
+        }
+    }
+
+    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+    struct ReplyPeer {
+        data: Value,
+    }
+    impl LedgerRecord for ReplyPeer {
+        const APP: &'static str = "plumage";
+        const MAX_KNOWN_SCHEMA: u32 = 2;
+        fn id(&self) -> &str {
+            self.data["id"].as_str().unwrap()
+        }
+        fn author(&self) -> &str {
+            ""
+        }
+        fn schema(&self) -> u32 {
+            self.data["schema"].as_u64().unwrap() as u32
+        }
+        fn validate(&self, _run: &str) -> forthebirds_store::Result<()> {
+            Ok(())
+        }
+        fn check_id(_id: &str) -> forthebirds_store::Result<()> {
+            Ok(())
+        }
+        fn receipt(&self) -> Option<(u64, u64)> {
+            None
+        }
+    }
+
+    #[test]
+    fn old_peers_skip_stances_and_keep_the_records_they_understand() {
+        let page = json!({"database_id":"db", "last_seq":3,"has_more":false,"records":[
+            vote_record(), argue_record(REPLY_SCHEMA,Some(format!("r:a:{}","cd".repeat(32)))), stance_record(stance_action(),STANCE_SCHEMA)
+        ]});
+        let current: ChangesPage<Record> = serde_json::from_value(page.clone()).unwrap();
+        assert_eq!(current.records.len(), 3);
+        let old: ChangesPage<OldPeer> = serde_json::from_value(page.clone()).unwrap();
+        assert_eq!(old.records.len(), 1);
+        let reply: ChangesPage<ReplyPeer> = serde_json::from_value(page).unwrap();
+        assert_eq!(reply.records.len(), 2);
     }
 }

@@ -3,6 +3,7 @@
 use crate::{
     colour::Colour,
     evidence::{Allowlist, Evidence, EvidenceId},
+    tally,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,6 +14,10 @@ use url::Url;
 pub const FETCHES_PER_ACTIVATION: usize = 3;
 pub const ARGUMENT_CHARS: usize = 400;
 pub const MAX_CITATIONS: usize = 8;
+pub const STANCE_PREFER_MIN: usize = 1;
+pub const STANCE_PREFER_MAX: usize = 3;
+pub const STANCE_ACCEPT_MAX: usize = 4;
+pub const STANCE_REFUSE_MAX: usize = 3;
 /// An argument id: `r:a:` and 64 lowercase hex digits.
 const REPLY_TO_PATTERN: &str = "^r:a:[0-9a-f]{64}$";
 
@@ -29,6 +34,12 @@ pub enum Action {
         /// answers nothing, and the field is omitted from its JSON.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
+    },
+    Stance {
+        prefer: Vec<Colour>,
+        accept: Vec<Colour>,
+        refuse: Vec<Colour>,
+        cites: Vec<EvidenceId>,
     },
     Vote {
         colour: Colour,
@@ -47,6 +58,7 @@ pub struct Context<'a> {
     pub arguments: &'a [(String, String)],
     /// Vote and evidence record ids in this run.
     pub other_records: &'a [String],
+    pub stance: Option<&'a tally::Stance>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +74,11 @@ pub enum Refusal {
     SelfReply,
     VoteBeforeReading,
     IdInText,
+    StanceBounds,
+    StanceColourRepeated,
+    StanceRefusalUncited,
+    VoteBeforeStance,
+    VoteOutsideStance,
 }
 
 impl Refusal {
@@ -73,6 +90,19 @@ impl Refusal {
             Self::IdInText => {
                 Some("put evidence ids in cites and argument ids in reply_to, not in text")
             }
+            Self::StanceBounds => Some("prefer needs 1 to 3 colours, accept 0 to 4, refuse 0 to 3"),
+            Self::StanceColourRepeated => {
+                Some("name each colour at most once across prefer, accept and refuse")
+            }
+            Self::StanceRefusalUncited => Some(
+                "a refusal cites at least one evidence id you fetched this run; cite one or leave refuse empty",
+            ),
+            Self::VoteBeforeStance => Some(
+                "declare a stance first; a vote needs one fetch, a stance and one argument in this run",
+            ),
+            Self::VoteOutsideStance => Some(
+                "vote a colour in your current prefer or accept lists, or declare a new stance first",
+            ),
             _ => None,
         }
     }
@@ -136,7 +166,45 @@ pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
                 }
             }
         }
-        Action::Vote { .. } => {
+        Action::Stance {
+            prefer,
+            accept,
+            refuse,
+            cites,
+        } => {
+            if !(STANCE_PREFER_MIN..=STANCE_PREFER_MAX).contains(&prefer.len())
+                || accept.len() > STANCE_ACCEPT_MAX
+                || refuse.len() > STANCE_REFUSE_MAX
+            {
+                return Err(Refusal::StanceBounds);
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            if prefer
+                .iter()
+                .chain(accept)
+                .chain(refuse)
+                .any(|colour| !seen.insert(colour))
+            {
+                return Err(Refusal::StanceColourRepeated);
+            }
+            if cites.len() > MAX_CITATIONS {
+                return Err(Refusal::TooManyCitations);
+            }
+            if !refuse.is_empty() && cites.is_empty() {
+                return Err(Refusal::StanceRefusalUncited);
+            }
+            for id in cites {
+                let evidence = context
+                    .evidence
+                    .iter()
+                    .find(|e| e.id() == id && e.run() == context.run)
+                    .ok_or(Refusal::UnknownCitation)?;
+                if evidence.author() != context.author {
+                    return Err(Refusal::ForeignCitation);
+                }
+            }
+        }
+        Action::Vote { colour } => {
             let fetched = context.evidence.iter().any(|evidence| {
                 evidence.author() == context.author && evidence.run() == context.run
             });
@@ -146,6 +214,10 @@ pub fn validate(action: &Action, context: &Context<'_>) -> Result<(), Refusal> {
                 .any(|(_, author)| author == context.author);
             if !fetched || !argued {
                 return Err(Refusal::VoteBeforeReading);
+            }
+            let stance = context.stance.ok_or(Refusal::VoteBeforeStance)?;
+            if !stance.prefer.contains(colour) && !stance.accept.contains(colour) {
+                return Err(Refusal::VoteOutsideStance);
             }
         }
     }
@@ -167,6 +239,16 @@ pub fn schema() -> Value {
                  "cites": {"type": "array", "maxItems": MAX_CITATIONS,
                            "items": {"type": "string"}},
                  "reply_to": {"type": "string", "pattern": REPLY_TO_PATTERN}}},
+            {"type": "object", "additionalProperties": false,
+             "required": ["action", "prefer", "accept", "refuse", "cites"],
+             "properties": {"action": {"const": "stance"},
+                 "prefer": {"type": "array", "minItems": STANCE_PREFER_MIN, "maxItems": STANCE_PREFER_MAX,
+                            "items": {"type": "string", "enum": Colour::ALL.map(|c| c.name())}},
+                 "accept": {"type": "array", "maxItems": STANCE_ACCEPT_MAX,
+                            "items": {"type": "string", "enum": Colour::ALL.map(|c| c.name())}},
+                 "refuse": {"type": "array", "maxItems": STANCE_REFUSE_MAX,
+                            "items": {"type": "string", "enum": Colour::ALL.map(|c| c.name())}},
+                 "cites": {"type": "array", "maxItems": MAX_CITATIONS, "items": {"type": "string"}}}},
             {"type": "object", "additionalProperties": false,
              "required": ["action", "colour"],
              "properties": {"action": {"const": "vote"},
@@ -201,6 +283,7 @@ mod tests {
             fetches_this_activation: fetches,
             arguments: &[],
             other_records: &[],
+            stance: None,
         }
     }
 
@@ -282,7 +365,7 @@ mod tests {
             assert_eq!(
                 validate(&vote, &ctx),
                 if author == "a" && run == "today" {
-                    Ok(())
+                    Err(Refusal::VoteBeforeStance)
                 } else {
                     Err(Refusal::VoteBeforeReading)
                 }
@@ -452,7 +535,7 @@ mod tests {
             assert!(validator.is_valid(&value), "{value}");
             assert_eq!(serde_json::from_value::<Action>(value).unwrap(), action);
         }
-        let declared = &schema()["oneOf"][2]["properties"]["colour"]["enum"];
+        let declared = &schema()["oneOf"][3]["properties"]["colour"]["enum"];
         assert_eq!(declared.as_array().unwrap().len(), 24);
         for value in [
             json!({"action": "vote", "colour": "Blue"}),
@@ -525,6 +608,7 @@ mod tests {
             fetches_this_activation: 0,
             arguments: &arguments,
             other_records: &other_records,
+            stance: None,
         };
         assert_eq!(
             validate(
@@ -610,5 +694,220 @@ mod tests {
             assert!(seed_offset(&peer, usize::MAX) < usize::MAX);
         }
         assert!(counts.into_iter().all(|count| count > 0));
+    }
+
+    fn stance(
+        prefer: Vec<Colour>,
+        accept: Vec<Colour>,
+        refuse: Vec<Colour>,
+        cites: Vec<EvidenceId>,
+    ) -> Action {
+        Action::Stance {
+            prefer,
+            accept,
+            refuse,
+            cites,
+        }
+    }
+
+    #[test]
+    fn stances_check_bounds_repeats_and_own_citations_in_order() {
+        use Colour::{Blue, Green, Red, Teal};
+        let evidence = [("a", "today"), ("b", "today"), ("a", "yesterday")]
+            .map(|(a, r)| Evidence::new(a.into(), r.into(), Url::parse(WIKI).unwrap(), 0, "fact"));
+        let ctx = context(&evidence, 0);
+        let own = vec![evidence[0].id().clone()];
+        for (action, expected) in [
+            (
+                stance(vec![Green], vec![Teal, Blue], vec![], vec![]),
+                Ok(()),
+            ),
+            (stance(vec![Green], vec![], vec![Red], own.clone()), Ok(())),
+            (
+                stance(vec![], vec![], vec![], vec![]),
+                Err(Refusal::StanceBounds),
+            ),
+            (
+                stance(
+                    vec![Green; 4],
+                    vec![],
+                    vec![],
+                    vec![EvidenceId("bad".into())],
+                ),
+                Err(Refusal::StanceBounds),
+            ),
+            (
+                stance(vec![Green], vec![Teal; 5], vec![], vec![]),
+                Err(Refusal::StanceBounds),
+            ),
+            (
+                stance(vec![Green], vec![], vec![Red; 4], vec![]),
+                Err(Refusal::StanceBounds),
+            ),
+            (
+                stance(vec![Green], vec![Green], vec![], vec![]),
+                Err(Refusal::StanceColourRepeated),
+            ),
+            (
+                stance(vec![Green, Green], vec![], vec![], vec![]),
+                Err(Refusal::StanceColourRepeated),
+            ),
+            (
+                stance(vec![Green], vec![], vec![Red], vec![]),
+                Err(Refusal::StanceRefusalUncited),
+            ),
+            (
+                stance(vec![Green], vec![], vec![], vec![own[0].clone(); 9]),
+                Err(Refusal::TooManyCitations),
+            ),
+            (
+                stance(
+                    vec![Green],
+                    vec![],
+                    vec![Red],
+                    vec![evidence[1].id().clone()],
+                ),
+                Err(Refusal::ForeignCitation),
+            ),
+            (
+                stance(vec![Green], vec![], vec![], vec![evidence[2].id().clone()]),
+                Err(Refusal::UnknownCitation),
+            ),
+            (
+                stance(
+                    vec![Green],
+                    vec![],
+                    vec![],
+                    vec![EvidenceId("unknown".into())],
+                ),
+                Err(Refusal::UnknownCitation),
+            ),
+        ] {
+            assert_eq!(validate(&action, &ctx), expected, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn votes_need_reading_then_a_stance_and_only_its_choices() {
+        use Colour::{Blue, Green, Navy, Red, Teal};
+        let evidence = [Evidence::new(
+            "a".into(),
+            "today".into(),
+            Url::parse(WIKI).unwrap(),
+            0,
+            "fact",
+        )];
+        let arguments = [("arg".into(), "a".into())];
+        let mut ctx = context(&evidence, 0);
+        ctx.arguments = &arguments;
+        assert_eq!(
+            validate(&Action::Vote { colour: Blue }, &ctx),
+            Err(Refusal::VoteBeforeStance)
+        );
+        let stance = tally::Stance {
+            id: "stance".into(),
+            author: "a".into(),
+            at_ms: 0,
+            prefer: vec![Green],
+            accept: vec![Teal, Blue],
+            refuse: vec![Red],
+            cites: vec![],
+        };
+        ctx.stance = Some(&stance);
+        for colour in [Green, Teal, Blue] {
+            assert_eq!(validate(&Action::Vote { colour }, &ctx), Ok(()));
+        }
+        for colour in [Red, Navy] {
+            assert_eq!(
+                validate(&Action::Vote { colour }, &ctx),
+                Err(Refusal::VoteOutsideStance)
+            );
+        }
+        ctx.evidence = &[];
+        assert_eq!(
+            validate(&Action::Vote { colour: Blue }, &ctx),
+            Err(Refusal::VoteBeforeReading)
+        );
+        ctx.evidence = &evidence;
+        ctx.arguments = &[];
+        assert_eq!(
+            validate(&Action::Vote { colour: Blue }, &ctx),
+            Err(Refusal::VoteBeforeReading)
+        );
+        for (refusal, reason) in [
+            (
+                Refusal::StanceBounds,
+                "prefer needs 1 to 3 colours, accept 0 to 4, refuse 0 to 3",
+            ),
+            (
+                Refusal::StanceColourRepeated,
+                "name each colour at most once across prefer, accept and refuse",
+            ),
+            (
+                Refusal::StanceRefusalUncited,
+                "a refusal cites at least one evidence id you fetched this run; cite one or leave refuse empty",
+            ),
+            (
+                Refusal::VoteBeforeStance,
+                "declare a stance first; a vote needs one fetch, a stance and one argument in this run",
+            ),
+            (
+                Refusal::VoteOutsideStance,
+                "vote a colour in your current prefer or accept lists, or declare a new stance first",
+            ),
+        ] {
+            assert_eq!(refusal.reason(), Some(reason));
+        }
+    }
+
+    #[test]
+    fn stance_schema_bounds_vocabulary_required_fields_and_rust_repeat_check() {
+        let schema = schema();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert_eq!(
+            schema["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["properties"]["action"]["const"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["fetch", "argue", "stance", "vote"]
+        );
+        let good = json!({"action":"stance", "prefer":["blue","green","teal"], "accept":["navy","red","sky","cyan"], "refuse":["black","white","pink"], "cites":vec!["id";MAX_CITATIONS]});
+        assert!(validator.is_valid(&good));
+        let action: Action = serde_json::from_value(good.clone()).unwrap();
+        assert_eq!(serde_json::to_value(action).unwrap(), good);
+        for (key, value) in [
+            ("prefer", json!([])),
+            ("prefer", json!(vec!["blue"; 4])),
+            ("accept", json!(vec!["blue"; 5])),
+            ("refuse", json!(vec!["blue"; 4])),
+            ("prefer", json!(["Blue"])),
+            ("prefer", json!(["ultraviolet"])),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert!(!validator.is_valid(&bad), "{bad}");
+            if let Ok(action) = serde_json::from_value::<Action>(bad) {
+                assert!(validate(&action, &context(&[], 0)).is_err());
+            }
+        }
+        for key in ["prefer", "accept", "refuse", "cites"] {
+            let mut bad = good.clone();
+            bad.as_object_mut().unwrap().remove(key);
+            assert!(!validator.is_valid(&bad));
+            assert!(serde_json::from_value::<Action>(bad).is_err());
+        }
+        let mut bad = good.clone();
+        bad["extra"] = json!(true);
+        assert!(!validator.is_valid(&bad));
+        assert!(serde_json::from_value::<Action>(bad).is_err());
+        let repeated =
+            json!({"action":"stance","prefer":["blue","blue"],"accept":[],"refuse":[],"cites":[]});
+        assert!(validator.is_valid(&repeated));
+        assert_eq!(
+            validate(&serde_json::from_value(repeated).unwrap(), &context(&[], 0)),
+            Err(Refusal::StanceColourRepeated)
+        );
     }
 }
