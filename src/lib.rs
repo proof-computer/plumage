@@ -14,6 +14,7 @@ pub mod fetch;
 pub mod lab;
 pub mod launch;
 pub mod liskov;
+pub mod observances;
 pub mod peer;
 pub mod prompt;
 pub mod record;

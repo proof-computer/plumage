@@ -166,6 +166,7 @@ impl<'a, S: Source> PeerActivation<'a, S> {
         let fetched = match fetch::fetch(
             self.source,
             &url,
+            &self.day,
             self.peer_id,
             &run,
             prior,
@@ -421,6 +422,7 @@ mod tests {
     enum Script {
         FetchWiki,
         FetchBirths,
+        FetchObservances,
         ArgueLastEvidence,
         ArgueUnknown,
         ArgueReply,
@@ -479,6 +481,9 @@ mod tests {
             .push(("/completion".into(), body));
         let step = fake.script.lock().unwrap().pop_front();
         let action = match step {
+            Some(Script::FetchObservances) => {
+                json!({"action": "fetch", "url": crate::observances::URL})
+            }
             Some(Script::FetchWiki) => json!({"action": "fetch", "url": fake.wiki_url}),
             Some(Script::FetchBirths) => {
                 json!({"action": "fetch", "url": fetch::sources(&day(), "p00")[1].to_string()})
@@ -1116,5 +1121,127 @@ mod tests {
         let requests = server.requests.lock().unwrap().clone();
         let results = tool_results(&requests);
         assert_eq!(results[0], r#"{"error":"not_allowed"}"#);
+    }
+
+    #[tokio::test]
+    async fn observance_fetch_is_evidence_without_a_source_call_and_costs_a_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = open_book(dir.path(), "p00.redb", "p00").await;
+        let source = FixedSource {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchObservances,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+            ],
+        );
+        let (url, task) = serve(server.clone()).await;
+        let model = model(&url);
+        let day: Day = "2026-02-02".parse().unwrap();
+        let clock = DayClock {
+            real_start_ms: day.open_ms(),
+            sim_start_ms: day.open_ms(),
+            speed: 1,
+        };
+        let mut failures = Vec::new();
+        let colour = activate(
+            &book,
+            &model,
+            &source,
+            "p00",
+            day,
+            clock,
+            limits(8),
+            "act-un",
+            &mut failures,
+        )
+        .await
+        .unwrap();
+        task.abort();
+        assert_eq!(colour, Colour::Blue);
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+        assert!(failures.is_empty());
+        let index = book.index();
+        assert_eq!(index.evidence.len(), 1);
+        let (_, evidence) = index.evidence.values().next().unwrap();
+        assert_eq!(evidence.url().as_str(), crate::observances::URL);
+        assert_eq!(evidence.excerpt(), "World Wetlands Day (A/RES/75/317)");
+        let requests = server.requests.lock().unwrap().clone();
+        let results = tool_results(&requests);
+        assert!(results[0].starts_with(r#"{"evidence_id":"#));
+        assert!(results[0].contains(evidence.excerpt()));
+        let contexts: Vec<Value> = requests
+            .iter()
+            .filter(|(path, _)| path == "/apply-template")
+            .map(|(_, body)| {
+                serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap()
+            })
+            .collect();
+        assert_eq!(contexts[0]["sources"].as_array().unwrap().len(), 6);
+        assert_eq!(contexts[0]["sources"][5], crate::observances::URL);
+        assert_eq!(contexts[0]["fetches_left"], 3);
+        assert_eq!(contexts[1]["fetches_left"], 2);
+        let completions: Vec<_> = requests
+            .iter()
+            .filter(|(path, _)| path == "/completion")
+            .collect();
+        assert_eq!(completions.len(), 3);
+        for ((_, body), may_vote) in completions.iter().zip([false, false, true]) {
+            assert_eq!(
+                body["json_schema"],
+                prompt::schema_allowing(&day, "p00", may_vote)
+            );
+        }
+        settled(&book).await;
+    }
+
+    #[tokio::test]
+    async fn unnamed_calendar_day_reports_failure_then_the_vote_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = open_book(dir.path(), "p00.redb", "p00").await;
+        let source = FixedSource {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchObservances,
+                Script::FetchWiki,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+            ],
+        );
+        let (url, task) = serve(server.clone()).await;
+        let model = model(&url);
+        let mut failures = Vec::new();
+        let colour = activate(
+            &book,
+            &model,
+            &source,
+            "p00",
+            day(),
+            clock(),
+            limits(8),
+            "act-un-empty",
+            &mut failures,
+        )
+        .await
+        .unwrap();
+        task.abort();
+        assert_eq!(colour, Colour::Blue);
+        assert_eq!(
+            failures,
+            vec![FetchFailure {
+                code: "source_invalid",
+                host: crate::observances::HOST.into()
+            }]
+        );
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(book.index().evidence.len(), 1);
+        let requests = server.requests.lock().unwrap().clone();
+        assert_eq!(tool_results(&requests)[0], r#"{"error":"source_invalid"}"#);
     }
 }

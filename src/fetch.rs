@@ -1,5 +1,6 @@
-//! The one place plumage touches the outside web: five allowlisted lists on one host,
-//! on one of four editions per peer, read into bounded evidence. Fetched text stays data.
+//! The one place plumage touches the outside web: the allowlisted lists on one
+//! host, read into bounded evidence, and one compiled calendar answered
+//! without a socket. Fetched text stays data.
 
 use std::{fmt, future::Future, path::PathBuf, time::Duration};
 
@@ -10,6 +11,7 @@ use crate::{
     actions::seed_offset,
     day::Day,
     evidence::{Allowlist, EDITIONS, Evidence, LISTS, WIKIMEDIA_HOST},
+    observances,
 };
 
 /// Refuse a response body larger than this, counted while it is read.
@@ -27,13 +29,17 @@ pub fn edition_for(peer_id: &str) -> &'static str {
     EDITIONS[seed_offset(peer_id, EDITIONS.len())]
 }
 
-/// The five owner-approved URLs for `day` and this peer, all permitted by the allowlist.
+/// The owner-approved URLs for `day` and this peer, including the calendar when it names the day.
 pub fn sources(day: &Day, peer_id: &str) -> Vec<Url> {
     let (month, day_of_month) = day.month_day();
     let edition = edition_for(peer_id);
-    LISTS.into_iter().map(|list| parse_source(&format!(
+    let mut sources: Vec<Url> = LISTS.into_iter().map(|list| parse_source(&format!(
         "https://{WIKIMEDIA_HOST}/feed/v1/wikipedia/{edition}/onthisday/{list}/{month:02}/{day_of_month:02}"
-    ))).collect()
+    ))).collect();
+    if !observances::for_day(day).is_empty() {
+        sources.push(parse_source(observances::URL));
+    }
+    sources
 }
 
 fn parse_source(url: &str) -> Url {
@@ -125,7 +131,7 @@ impl Source for HttpSource {
 
 /// Allowlist first, so a refused URL never opens a socket.
 async fn read_limited(client: &reqwest::Client, url: &Url) -> Result<Vec<u8>, FetchError> {
-    if !Allowlist::permits(url) {
+    if !Allowlist::permits_live(url) {
         return Err(failure("not_allowed", format!("refused {url}")));
     }
     let mut response = client
@@ -203,6 +209,11 @@ fn extract_list(
             format!("{list} contains no text"),
         ));
     }
+    Ok(rotated(&kept, author, prior))
+}
+
+fn rotated(kept: &[String], author: &str, prior: usize) -> String {
+    let len = kept.len();
     // Q-20261023-7xbm: the first fetch starts at sha256(author) mod len.
     // `as u128` is lossless: a `usize` is never wider than `u128`.
     let start = (seed_offset(author, len) as u128 + prior as u128) % (len as u128);
@@ -211,16 +222,17 @@ fn extract_list(
     for index in 0..len {
         lines.push(kept[(start + index) % len].as_str());
     }
-    Ok(lines.join("\n"))
+    lines.join("\n")
 }
 
-/// Allowlist, then `get`, then [`extract`], then [`Evidence::new`].
+/// Allowlist, then the compiled calendar or `get` and [`extract`], then [`Evidence::new`].
 ///
 /// The caller counts an `Ok` against `FETCHES_PER_ACTIVATION` and supplies
 /// `prior` (earlier evidence for this URL by `author` in this run).
 pub async fn fetch<S: Source>(
     source: &S,
     url: &Url,
+    day: &Day,
     author: &str,
     run: &str,
     prior: usize,
@@ -229,8 +241,22 @@ pub async fn fetch<S: Source>(
     if !Allowlist::permits(url) {
         return Err(failure("not_allowed", format!("refused {url}")));
     }
-    let body = source.get(url).await?;
-    let text = extract(url, &body, author, prior)?;
+    let text = if Allowlist::is_observances(url) {
+        let kept: Vec<_> = observances::for_day(day)
+            .into_iter()
+            .map(observances::line)
+            .collect();
+        if kept.is_empty() {
+            return Err(failure(
+                "source_invalid",
+                format!("no UN observance on {day}"),
+            ));
+        }
+        rotated(&kept, author, prior)
+    } else {
+        let body = source.get(url).await?;
+        extract(url, &body, author, prior)?
+    };
     Ok(Evidence::new(
         author.to_owned(),
         run.to_owned(),
@@ -439,11 +465,13 @@ mod tests {
             for url in &urls {
                 assert_eq!(source.get(url).await.unwrap(), body);
             }
-            let evidence = fetch(&source, &urls[0], peer, "run", 0, 0).await.unwrap();
+            let evidence = fetch(&source, &urls[0], &day("2026-10-26"), peer, "run", 0, 0)
+                .await
+                .unwrap();
             assert_eq!(evidence.url(), &urls[0]);
             for url in &urls[1..] {
                 assert_eq!(
-                    fetch(&source, url, peer, "run", 0, 0)
+                    fetch(&source, url, &day("2026-10-26"), peer, "run", 0, 0)
                         .await
                         .unwrap_err()
                         .code,
@@ -482,7 +510,7 @@ mod tests {
         ] {
             let url = Url::parse(text).unwrap();
             assert_eq!(
-                fetch(&source, &url, "a", "run", 0, 0)
+                fetch(&source, &url, &day("2026-10-26"), "a", "run", 0, 0)
                     .await
                     .unwrap_err()
                     .code,
@@ -508,9 +536,17 @@ mod tests {
             body: body.clone(),
             calls: AtomicUsize::new(0),
         };
-        let record = fetch(&source, &url, "a", "run", 0, 1_761_436_800_000)
-            .await
-            .unwrap();
+        let record = fetch(
+            &source,
+            &url,
+            &day("2026-10-26"),
+            "a",
+            "run",
+            0,
+            1_761_436_800_000,
+        )
+        .await
+        .unwrap();
         let text = extract(&url, &body, "a", 0).unwrap();
         assert!(text.chars().count() > 600);
         assert_eq!(
@@ -539,5 +575,79 @@ mod tests {
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             other => panic!("listener accepted a connection: {other:?}"),
         }
+    }
+
+    #[test]
+    fn calendar_is_offered_only_on_a_named_day_after_the_five_lists() {
+        for peer in ["p00", "b", "p01", "a"] {
+            let urls = sources(&day("2026-02-02"), peer);
+            assert_eq!(urls.len(), 6);
+            for (url, list) in urls.iter().zip(LISTS) {
+                assert_eq!(Allowlist::source(url), Some((edition_for(peer), list)));
+                assert!(Allowlist::permits_live(url));
+            }
+            assert_eq!(urls[5].as_str(), observances::URL);
+            assert!(urls.iter().all(Allowlist::permits));
+            assert!(!Allowlist::permits_live(&urls[5]));
+            let empty = sources(&day("2026-10-26"), peer);
+            assert_eq!(empty.len(), 5);
+            assert!(!empty.iter().any(Allowlist::is_observances));
+        }
+    }
+
+    #[tokio::test]
+    async fn calendar_fetches_rotate_and_digest_without_calling_the_source() {
+        let source = CountingSource {
+            body: Vec::new(),
+            calls: AtomicUsize::new(0),
+        };
+        let day = day("2026-03-21");
+        let url = Url::parse(observances::URL).unwrap();
+        let kept: Vec<_> = observances::for_day(&day)
+            .into_iter()
+            .map(observances::line)
+            .collect();
+        assert_eq!(kept.len(), 7);
+        for (author, prior) in [("a", 0), ("a", 1), ("p01", 0), ("a", usize::MAX)] {
+            let start = ((seed_offset(author, kept.len()) as u128 + prior as u128)
+                % kept.len() as u128) as usize;
+            let expected = kept[start..]
+                .iter()
+                .chain(&kept[..start])
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let record = fetch(&source, &url, &day, author, "run", prior, 0)
+                .await
+                .unwrap();
+            assert_eq!(record.excerpt(), expected);
+            assert_eq!(
+                record.sha256(),
+                format!("{:x}", Sha256::digest(expected.as_bytes()))
+            );
+            assert_eq!(record.url(), &url);
+        }
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unnamed_calendar_day_and_direct_http_are_refused_without_a_source_call() {
+        let source = CountingSource {
+            body: Vec::new(),
+            calls: AtomicUsize::new(0),
+        };
+        let url = Url::parse(observances::URL).unwrap();
+        let error = fetch(&source, &url, &day("2026-10-26"), "a", "run", 0, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "source_invalid");
+        assert!(error.message.contains("2026-10-26"));
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            extract(&url, b"{}", "a", 0).unwrap_err().code,
+            "source_invalid"
+        );
+        let http = HttpSource::new(Duration::from_secs(1)).unwrap();
+        assert_eq!(http.get(&url).await.unwrap_err().code, "not_allowed");
     }
 }

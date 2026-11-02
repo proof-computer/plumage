@@ -36,6 +36,10 @@ schema and validation. Fetch intents permit only Wikipedia's On this day lists
 for the date (events, births, deaths, holidays, selected) on one of four editions
 (en, de, fr, es), with three fetches per activation; each peer reads the edition
 a hash of its id selects.
+On a day the United Nations' list of international days and weeks names, a peer
+may also fetch `https://www.un.org/en/observances/list-days-weeks`; the answer
+comes from `assets/un-observances.json`, compiled into the binary, and no socket
+is opened to un.org.
 Evidence retains a SHA-256 digest and at most 600 characters; arguments are
 limited to 400 characters and eight citations fetched by their author in the
 same run. An argument may also name one other author's argument it answers.
@@ -43,7 +47,11 @@ Records and the citation rule are enforced on the store: a fetch is
 stored as evidence, and an argument is written or imported only when its
 citations pass that rule and, when it names one, the argument it answers. Peer-id SHA-256 hashes seed the initial event
 offset. The fetch executor reads the five lists of the peer's edition and stores
-bounded evidence, whole lines up to 600 characters. The site renders from votes,
+bounded evidence, whole lines up to 600 characters.
+`scripts/check-un-observances.py` diffs that calendar against the live page
+(`--write` refreshes it), `.github/workflows/un-observances-drift.yml` runs it
+every Monday and on dispatch, and a release runs it first.
+The site renders from votes,
 arguments and evidence as exact counts
 with the published formulas. Every page shares one shell: the decided colour is the page ground,
 Bricolage Grotesque and IBM Plex Mono are served beside the pages, and the
@@ -143,6 +151,10 @@ internet. Every page shows its records' freshness.
   vote), and publishes the formula beside each count. It infers nothing.
 
 ## Releasing
+
+Run `python3 scripts/check-un-observances.py` first. It exits 1 on drift; then
+run it with `--write` and land the refreshed `assets/un-observances.json`
+through a pull request before building the payload.
 
 Dispatch both workflows on `main` after the Application exists. Nothing in
 this repository publishes a policy, creates a secret, or opens a tunnel.

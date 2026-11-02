@@ -1,4 +1,4 @@
-//! Bounded fetched data from five allowlisted lists on one host.
+//! Bounded fetched data from allowlisted lists and a compiled calendar.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -6,6 +6,8 @@ use url::Url;
 
 // ADR-0271 §5: Wikipedia's five lists for the date, whole lines up to 600 characters.
 // ADR-0272 §1: on one of four editions, chosen by a hash of the peer id.
+// ADR-0272 §2: the UN observances are a compiled calendar served as a
+// source; no socket to un.org.
 pub const EXCERPT_CHARS: usize = 600;
 pub const WIKIMEDIA_HOST: &str = "api.wikimedia.org";
 pub const EDITIONS: [&str; 4] = ["en", "de", "fr", "es"];
@@ -154,7 +156,15 @@ pub struct Allowlist;
 
 impl Allowlist {
     pub fn permits(url: &Url) -> bool {
-        Self::list(url).is_some()
+        Self::list(url).is_some() || Self::is_observances(url)
+    }
+
+    pub fn is_observances(url: &Url) -> bool {
+        url.as_str() == crate::observances::URL
+    }
+
+    pub fn permits_live(url: &Url) -> bool {
+        Self::permits(url) && !Self::is_observances(url)
     }
 
     pub fn list(url: &Url) -> Option<&'static str> {
@@ -441,5 +451,68 @@ mod tests {
         let mut foreign_url = value;
         foreign_url["url"] = serde_json::json!("https://example.com/");
         assert!(serde_json::from_value::<Evidence>(foreign_url).is_err());
+    }
+
+    #[test]
+    fn observance_url_is_exact_and_never_live() {
+        use crate::observances;
+        for text in [
+            observances::URL,
+            &observances::URL.replace("www.un.org", "WWW.un.org:443"),
+        ] {
+            let url = Url::parse(text).unwrap();
+            assert!(Allowlist::is_observances(&url));
+            assert!(Allowlist::permits(&url));
+            assert!(!Allowlist::permits_live(&url));
+            assert_eq!(Allowlist::list(&url), None);
+        }
+        let variants = [
+            observances::URL.replace("https:", "http:"),
+            format!("{}/", observances::URL),
+            format!("{}?", observances::URL),
+            format!("{}?x=1", observances::URL),
+            format!("{}#", observances::URL),
+            format!("{}#top", observances::URL),
+            observances::URL.replace("www.un.org", "www.un.org:444"),
+            observances::URL.replace("www.un.org", "reader@www.un.org"),
+            observances::URL.replace("www.un.org", "un.org"),
+            observances::URL.replace("www.un.org", "www.un.org.example.com"),
+            observances::URL.replace("/en/", "/fr/"),
+            observances::URL.replace("list-days-weeks", "list-days%2Dweeks"),
+            observances::URL.replace("list-days-weeks", ""),
+            format!("{}/february", observances::URL),
+        ];
+        for text in variants {
+            let url = Url::parse(&text).unwrap();
+            assert!(!Allowlist::is_observances(&url), "{text}");
+            assert!(!Allowlist::permits(&url), "{text}");
+            assert!(!Allowlist::permits_live(&url), "{text}");
+        }
+        for peer in ["p00", "b", "p01", "a"] {
+            for url in crate::fetch::sources(&"2026-10-26".parse().unwrap(), peer) {
+                assert!(Allowlist::permits_live(&url));
+            }
+        }
+    }
+
+    #[test]
+    fn observance_evidence_round_trips_and_refuses_another_host() {
+        let url = Url::parse(crate::observances::URL).unwrap();
+        let record = Evidence::new(
+            "a".into(),
+            "run".into(),
+            url,
+            0,
+            "World Wetlands Day (A/RES/75/317)",
+        );
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<Evidence>(&encoded).unwrap(), record);
+        let refused = encoded.replace("www.un.org", "un.org");
+        assert!(
+            serde_json::from_str::<Evidence>(&refused)
+                .unwrap_err()
+                .to_string()
+                .contains("url is outside the allowlist")
+        );
     }
 }
