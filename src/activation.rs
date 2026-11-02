@@ -670,11 +670,30 @@ mod tests {
                 }
                 "/completion" => {
                     let context = pending.take().expect("a context before each completion");
-                    let offers_vote = body["json_schema"]["oneOf"]
+                    let vote = body["json_schema"]["oneOf"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|choice| choice["properties"]["action"]["const"] == "vote");
+                        .find(|choice| choice["properties"]["action"]["const"] == "vote");
+                    let offers_vote = vote.is_some();
+                    assert_eq!(
+                        context["before_vote"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&json!("stance")),
+                        context["your_stance"].is_null(),
+                    );
+                    if let Some(vote) = vote {
+                        let stance = &context["your_stance"];
+                        let colours = stance["prefer"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .chain(stance["accept"].as_array().unwrap())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        assert_eq!(vote["properties"]["colour"]["enum"], json!(colours));
+                    }
                     assert_eq!(context["may_vote"], offers_vote);
                     assert_eq!(
                         context["before_vote"].as_array().unwrap().is_empty(),
@@ -694,6 +713,8 @@ mod tests {
         let mut context = json!({
             "arguments": [{"id": "a1"}, {"id": "a2"}],
             "your_evidence": [{"id": "e1"}, {"id": "e2"}],
+            "stances": [{"id": "s1"}],
+            "stance_counts": [{"colour": "red"}],
             "may_vote": true,
         });
         for (arguments, evidence) in [
@@ -706,8 +727,12 @@ mod tests {
             assert_eq!(context["arguments"], arguments);
             assert_eq!(context["your_evidence"], evidence);
             assert_eq!(context["may_vote"], true);
+            assert_eq!(context["stances"], json!([{"id": "s1"}]));
+            assert_eq!(context["stance_counts"], json!([{"colour": "red"}]));
         }
         assert!(!drop_oldest(&mut context));
+        assert_eq!(context["stances"], json!([{"id": "s1"}]));
+        assert_eq!(context["stance_counts"], json!([{"colour": "red"}]));
     }
 
     async fn settled(book: &Book) {
@@ -1080,6 +1105,19 @@ mod tests {
             )
             .await
             .unwrap();
+        author
+            .write(
+                "stance-0",
+                Action::Stance {
+                    prefer: vec![Colour::Blue],
+                    accept: vec![],
+                    refuse: vec![],
+                    cites: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap();
         let page = author.ledger().page(None, 16).await.unwrap();
         let mut evidence_records = Vec::new();
         let mut action_records = Vec::new();
@@ -1101,19 +1139,6 @@ mod tests {
             .await
             .unwrap();
 
-        author
-            .write(
-                "stance-0",
-                Action::Stance {
-                    prefer: vec![Colour::Blue],
-                    accept: vec![],
-                    refuse: vec![],
-                    cites: vec![],
-                },
-                1,
-            )
-            .await
-            .unwrap();
         let source = FixedSource {
             calls: Arc::new(AtomicUsize::new(0)),
         };
@@ -1145,6 +1170,35 @@ mod tests {
             .unwrap();
             task.abort();
             let requests = server.requests.lock().unwrap().clone();
+            let contexts = requests
+                .iter()
+                .filter(|(path, _)| path == "/apply-template")
+                .map(|(_, body)| {
+                    serde_json::from_str::<Value>(body["messages"][1]["content"].as_str().unwrap())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            if peer == "p00" {
+                assert!(contexts[0]["your_stance"].is_null());
+                let stance = &author.index().stances["p01"];
+                assert_eq!(
+                    contexts[0]["stances"],
+                    json!([{
+                        "id": stance.id, "author": "p01", "at": crate::day::utc_time(clock().sim(stance.at_ms)),
+                        "prefer": ["blue"], "accept": [], "refuse": [], "cites": [],
+                    }])
+                );
+                assert_eq!(
+                    contexts[0]["stance_counts"],
+                    json!(Colour::ALL.map(|colour| json!({
+                        "colour": colour.name(), "preferred": 0, "accepted": 0, "refused": 0,
+                    })))
+                );
+                assert_eq!(contexts[2]["your_stance"]["author"], "p00");
+                assert_eq!(contexts[2]["stances"].as_array().unwrap().len(), 2);
+            } else {
+                assert_eq!(contexts[0]["your_stance"]["author"], "p01");
+            }
             let (_, body) = requests
                 .iter()
                 .find(|(path, _)| path == "/apply-template")
