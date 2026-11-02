@@ -63,7 +63,11 @@ impl<'a, S: Source> Activation for PeerActivation<'a, S> {
     async fn schema_for_turn(&mut self, _turn: usize, _context: &Value) -> Result<Option<Value>> {
         let run = &self.book.ledger().config.run_id;
         let gate = prompt::vote_gate(&self.book.index(), self.peer_id, run);
-        Ok(Some(prompt::schema_allowing(&self.day, gate.may_vote())))
+        Ok(Some(prompt::schema_allowing(
+            &self.day,
+            self.peer_id,
+            gate.may_vote(),
+        )))
     }
 
     async fn prepare(&mut self, messages: &mut Vec<Value>, context: &Value) -> Result<Prepared> {
@@ -239,7 +243,7 @@ pub async fn activate<S: Source>(
     };
     forthebirds_runtime::activation::run(
         model,
-        &prompt::schema_for(&day),
+        &prompt::schema_for(&day, peer_id),
         limits,
         &mut host,
         &mut messages,
@@ -477,7 +481,7 @@ mod tests {
         let action = match step {
             Some(Script::FetchWiki) => json!({"action": "fetch", "url": fake.wiki_url}),
             Some(Script::FetchBirths) => {
-                json!({"action": "fetch", "url": fetch::sources(&day())[1].to_string()})
+                json!({"action": "fetch", "url": fetch::sources(&day(), "p00")[1].to_string()})
             }
             Some(Script::ArgueLastEvidence) => {
                 let context = fake.last_context.lock().unwrap().clone();
@@ -537,8 +541,8 @@ mod tests {
         Book::open(config(&dir.join(name), peer)).await.unwrap()
     }
 
-    fn fake(script: Vec<Script>) -> Fake {
-        let wiki_url = fetch::sources(&day())[0].to_string();
+    fn fake(peer: &str, script: Vec<Script>) -> Fake {
+        let wiki_url = fetch::sources(&day(), peer)[0].to_string();
         Fake {
             requests: Arc::new(Mutex::new(Vec::new())),
             script: Arc::new(Mutex::new(script.into())),
@@ -568,7 +572,7 @@ mod tests {
             .collect()
     }
 
-    fn assert_schemas(requests: &[(String, Value)], may_vote: &[bool]) {
+    fn assert_schemas(requests: &[(String, Value)], peer: &str, may_vote: &[bool]) {
         let completions: Vec<_> = requests
             .iter()
             .filter(|(path, _)| path == "/completion")
@@ -577,7 +581,7 @@ mod tests {
         for ((_, body), allowed) in completions.into_iter().zip(may_vote) {
             assert_eq!(
                 body["json_schema"],
-                prompt::schema_allowing(&day(), *allowed)
+                prompt::schema_allowing(&day(), peer, *allowed)
             );
         }
     }
@@ -650,11 +654,14 @@ mod tests {
         let source = FixedSource {
             calls: Arc::new(AtomicUsize::new(0)),
         };
-        let server = fake(vec![
-            Script::FetchWiki,
-            Script::ArgueLastEvidence,
-            Script::VoteBlue,
-        ]);
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchWiki,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+            ],
+        );
         let (url, task) = serve(server.clone()).await;
         let model = model(&url);
         let colour = activate(
@@ -681,9 +688,9 @@ mod tests {
         assert_eq!(source.calls.load(Ordering::SeqCst), 1);
         settled(&book).await;
         let requests = server.requests.lock().unwrap().clone();
-        assert_schemas(&requests, &[false, false, true]);
+        assert_schemas(&requests, "p00", &[false, false, true]);
 
-        let server = fake(vec![Script::VoteBlue]);
+        let server = fake("p00", vec![Script::VoteBlue]);
         let (url, task) = serve(server.clone()).await;
         let next_model = self::model(&url);
         let colour = activate(
@@ -703,7 +710,7 @@ mod tests {
         assert_eq!(colour, Colour::Blue);
         assert_eq!(book.index().votes.len(), 2);
         assert_eq!(source.calls.load(Ordering::SeqCst), 1);
-        assert_schemas(&server.requests.lock().unwrap(), &[true]);
+        assert_schemas(&server.requests.lock().unwrap(), "p00", &[true]);
     }
 
     #[tokio::test]
@@ -713,14 +720,17 @@ mod tests {
         let source = FixedSource {
             calls: Arc::new(AtomicUsize::new(0)),
         };
-        let server = fake(vec![
-            Script::FetchWiki,
-            Script::FetchWiki,
-            Script::FetchWiki,
-            Script::FetchWiki,
-            Script::ArgueLastEvidence,
-            Script::VoteBlue,
-        ]);
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchWiki,
+                Script::FetchWiki,
+                Script::FetchWiki,
+                Script::FetchWiki,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+            ],
+        );
         let (url, task) = serve(server.clone()).await;
         let model = model(&url);
         let mut failures = Vec::new();
@@ -744,7 +754,7 @@ mod tests {
         let requests = server.requests.lock().unwrap().clone();
         let results = tool_results(&requests);
         assert_eq!(results[3], r#"{"refused":"BudgetExhausted"}"#);
-        assert_schemas(&requests, &[false, false, false, false, false, true]);
+        assert_schemas(&requests, "p00", &[false, false, false, false, false, true]);
     }
 
     #[tokio::test]
@@ -754,14 +764,17 @@ mod tests {
         let source = FixedSource {
             calls: Arc::new(AtomicUsize::new(0)),
         };
-        let server = fake(vec![
-            Script::Invalid,
-            Script::ArgueUnknown,
-            Script::VoteBlue,
-            Script::FetchWiki,
-            Script::ArgueLastEvidence,
-            Script::VoteBlue,
-        ]);
+        let server = fake(
+            "p00",
+            vec![
+                Script::Invalid,
+                Script::ArgueUnknown,
+                Script::VoteBlue,
+                Script::FetchWiki,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+            ],
+        );
         let (url, task) = serve(server.clone()).await;
         let model = model(&url);
         let colour = activate(
@@ -790,7 +803,7 @@ mod tests {
             result,
             json!({"refused": "VoteBeforeReading", "reason": "fetch one source and post one argument first; a vote needs both in this run"})
         );
-        assert_schemas(&requests, &[false, false, false, false, false, true]);
+        assert_schemas(&requests, "p00", &[false, false, false, false, false, true]);
     }
 
     #[tokio::test]
@@ -800,7 +813,7 @@ mod tests {
         let evidence = Evidence::new(
             "p01".into(),
             "run-1".into(),
-            fetch::sources(&day())[0].clone(),
+            fetch::sources(&day(), "p00")[0].clone(),
             day().open_ms(),
             "a fact",
         );
@@ -842,11 +855,10 @@ mod tests {
         let source = FixedSource {
             calls: Arc::new(AtomicUsize::new(0)),
         };
-        let server = fake(vec![
-            Script::FetchWiki,
-            Script::ArgueReply,
-            Script::VoteBlue,
-        ]);
+        let server = fake(
+            "p00",
+            vec![Script::FetchWiki, Script::ArgueReply, Script::VoteBlue],
+        );
         let (url, task) = serve(server.clone()).await;
         let reply_model = model(&url);
         let colour = activate(
@@ -875,12 +887,15 @@ mod tests {
 
         let fresh = tempfile::tempdir().unwrap();
         let book = open_book(fresh.path(), "p00.redb", "p00").await;
-        let server = fake(vec![
-            Script::FetchWiki,
-            Script::ArgueUnknownReply,
-            Script::ArgueLastEvidence,
-            Script::VoteBlue,
-        ]);
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchWiki,
+                Script::ArgueUnknownReply,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+            ],
+        );
         let (url, task) = serve(server.clone()).await;
         let unknown_model = model(&url);
         let colour = activate(
@@ -912,7 +927,7 @@ mod tests {
         let source = FixedSource {
             calls: Arc::new(AtomicUsize::new(0)),
         };
-        let server = fake(vec![Script::FetchWiki, Script::ArgueLastEvidence]);
+        let server = fake("p00", vec![Script::FetchWiki, Script::ArgueLastEvidence]);
         let (url, task) = serve(server.clone()).await;
         let model = model(&url);
         let error = activate(
@@ -943,7 +958,7 @@ mod tests {
         let evidence = Evidence::new(
             "p01".into(),
             "run-1".into(),
-            fetch::sources(&day())[0].clone(),
+            fetch::sources(&day(), "p00")[0].clone(),
             day().open_ms(),
             "EXCERPT-ONLY-P01-SHOULD-NOT-LEAK",
         );
@@ -987,11 +1002,14 @@ mod tests {
         };
         let mut prompts = Vec::new();
         for (peer, book) in [("p00", &reader), ("p01", &author)] {
-            let server = fake(vec![
-                Script::FetchWiki,
-                Script::ArgueLastEvidence,
-                Script::VoteBlue,
-            ]);
+            let server = fake(
+                peer,
+                vec![
+                    Script::FetchWiki,
+                    Script::ArgueLastEvidence,
+                    Script::VoteBlue,
+                ],
+            );
             let (url, task) = serve(server.clone()).await;
             let model = model(&url);
             activate(
@@ -1022,6 +1040,7 @@ mod tests {
             assert_context_matches_next_schema(&requests);
             assert_schemas(
                 &requests,
+                peer,
                 if peer == "p00" {
                     &[false, false, true]
                 } else {
@@ -1035,8 +1054,19 @@ mod tests {
         assert_eq!(prompts[0].1["you"], "p00");
         assert_eq!(prompts[1].1["you"], "p01");
         assert_eq!(prompts[0].1["date"], "2026-10-26");
-        let sources = fetch::sources(&day()).map(|url| url.to_string());
-        assert_eq!(prompts[0].1["sources"], json!(sources));
+        for ((_, context, _), (peer, edition)) in prompts.iter().zip([("p00", "en"), ("p01", "fr")])
+        {
+            assert_eq!(context["edition"], edition);
+            assert_eq!(
+                context["sources"],
+                json!(
+                    fetch::sources(&day(), peer)
+                        .into_iter()
+                        .map(|url| url.to_string())
+                        .collect::<Vec<_>>()
+                )
+            );
+        }
         assert!(prompts[0].2.contains("ARGUMENT-P01-VISIBLE"));
         assert!(!prompts[0].0.contains("ARGUMENT-P01-VISIBLE"));
         assert!(!prompts[0].2.contains("EXCERPT-ONLY-P01-SHOULD-NOT-LEAK"));
@@ -1050,12 +1080,15 @@ mod tests {
         let source = BirthsRefused {
             calls: Arc::new(AtomicUsize::new(0)),
         };
-        let server = fake(vec![
-            Script::FetchBirths,
-            Script::FetchWiki,
-            Script::ArgueLastEvidence,
-            Script::VoteBlue,
-        ]);
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchBirths,
+                Script::FetchWiki,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+            ],
+        );
         let (url, task) = serve(server.clone()).await;
         let model = model(&url);
         let mut failures = Vec::new();

@@ -6,7 +6,7 @@ use crate::actions::{ARGUMENT_CHARS, FETCHES_PER_ACTIVATION, MAX_CITATIONS};
 use crate::closing::{HOLD_MS, HOLDING_RULE, LIVE_RULE, RULE};
 use crate::colour::Colour;
 use crate::day::CLOSE_AFTER_MS;
-use crate::evidence::{EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
+use crate::evidence::{EDITIONS, EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
 use crate::tally::{CURRENT_VOTES_RULE, VOTE_CHANGES_RULE};
 
 use super::layout::{document, push_escaped};
@@ -126,9 +126,13 @@ fn push_actions(out: &mut String) {
     push_action(
         out,
         "fetch",
-        "Read one of today’s five lists from Wikipedia’s “On this day” feed.",
+        "Read one of today’s five lists from the peer’s Wikipedia “On this day” feed.",
         &[
             format!("<code>{WIKIMEDIA_HOST}</code>: {}", LISTS.join(", ")),
+            format!(
+                "One of four editions per peer, set by a hash of its id: {}",
+                EDITIONS.join(", ")
+            ),
             format!("{FETCHES_PER_ACTIVATION} fetches per activation"),
             "Each peer starts at a different entry of each list, set by a hash of its id"
                 .to_owned(),
@@ -291,7 +295,7 @@ mod tests {
     use crate::closing::{HOLD_MS, HOLDING_RULE, LIVE_RULE, RULE};
     use crate::colour::Colour;
     use crate::day::CLOSE_AFTER_MS;
-    use crate::evidence::{EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
+    use crate::evidence::{EDITIONS, EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
     use crate::site::support::assert_clean;
     use crate::site::{Chrome, Paint};
     use crate::tally::{CURRENT_VOTES_RULE, VOTE_CHANGES_RULE};
@@ -325,9 +329,9 @@ mod tests {
         assert!(html.contains(&format!("up to {MAX_CITATIONS} pieces of evidence")));
         assert!(html.contains(&format!("Stored as evidence: URL, time, SHA-256 digest, whole lines up to {EXCERPT_CHARS} characters")));
         assert!(html.contains(&format!("<code>{WIKIMEDIA_HOST}</code>")));
-        assert!(
-            html.contains("Read one of today’s five lists from Wikipedia’s “On this day” feed.")
-        );
+        assert!(html.contains(
+            "Read one of today’s five lists from the peer’s Wikipedia “On this day” feed."
+        ));
         assert!(html.contains(&format!(
             "<code>{WIKIMEDIA_HOST}</code>: {}",
             LISTS.join(", ")
@@ -335,6 +339,29 @@ mod tests {
         assert!(html.contains(
             "Each peer starts at a different entry of each list, set by a hash of its id"
         ));
+        let fetch = html
+            .split_once(
+                "Read one of today’s five lists from the peer’s Wikipedia “On this day” feed.",
+            )
+            .unwrap()
+            .1;
+        let limits = [
+            format!("<code>{WIKIMEDIA_HOST}</code>: {}", LISTS.join(", ")),
+            format!(
+                "One of four editions per peer, set by a hash of its id: {}",
+                EDITIONS.join(", ")
+            ),
+            "3 fetches per activation".to_owned(),
+            "Each peer starts at a different entry of each list, set by a hash of its id"
+                .to_owned(),
+            "Stored as evidence: URL, time, SHA-256 digest, whole lines up to 600 characters"
+                .to_owned(),
+        ];
+        let mut remaining = fetch;
+        for limit in limits {
+            remaining = remaining.split_once(&limit).unwrap().1;
+        }
+        assert_eq!(html.matches("en, de, fr, es").count(), 1);
         for absent in ["sunrise", "sunset", "two sources"] {
             assert!(!html.contains(absent), "{absent}");
         }

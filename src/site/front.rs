@@ -465,7 +465,7 @@ fn push_facts(out: &mut String, page: &DayPage<'_>) {
     out.push_str(
         "<section class=\"side\" aria-labelledby=\"facts-h\"><h2 id=\"facts-h\">Today\u{2019}s facts</h2>\n",
     );
-    out.push_str("<p style=\"font-size:15px\">What the peers fetched. Each can afford three fetches per activation, from five lists.</p>");
+    out.push_str("<p style=\"font-size:15px\">What the peers fetched. Each can afford three fetches per activation, from five lists of its Wikipedia edition.</p>");
     out.push_str(&formula(CITATIONS_RULE));
     for group in groups.iter().take(FACTS_SHOWN) {
         let first = group.records[0];
@@ -478,7 +478,7 @@ fn push_facts(out: &mut String, page: &DayPage<'_>) {
             out.push_str("\"></a>");
         }
         out.push_str("<div class=\"meta\"><span>");
-        push_escaped(out, source_label(first));
+        push_escaped(out, &source_label(first));
         out.push_str("</span><span>ev ");
         push_escaped(out, &prefix(&first.id().0));
         out.push_str("</span></div>\n<p class=\"excerpt\">");
@@ -560,15 +560,19 @@ fn cited_phrase(count: usize) -> String {
     }
 }
 
-pub(super) fn source_label(evidence: &Evidence) -> &str {
-    match Allowlist::list(evidence.url()) {
-        Some("events") => "Wikipedia · Events",
-        Some("births") => "Wikipedia · Births",
-        Some("deaths") => "Wikipedia · Deaths",
-        Some("holidays") => "Wikipedia · Holidays",
-        Some("selected") => "Wikipedia · Selected",
-        _ => evidence.url().host_str().unwrap_or("source"),
-    }
+pub(super) fn source_label(evidence: &Evidence) -> String {
+    let Some((edition, list)) = Allowlist::source(evidence.url()) else {
+        return evidence.url().host_str().unwrap_or("source").to_owned();
+    };
+    let list = match list {
+        "events" => "Events",
+        "births" => "Births",
+        "deaths" => "Deaths",
+        "holidays" => "Holidays",
+        "selected" => "Selected",
+        _ => return evidence.url().host_str().unwrap_or("source").to_owned(),
+    };
+    format!("Wikipedia ({edition}) · {list}")
 }
 
 enum Event<'a> {
@@ -1406,7 +1410,7 @@ mod tests {
         ));
         assert!(html.contains(&format!("<article class=\"card fact\" id=\"fact-{id}\">")));
         assert!(html.contains(&format!(
-            "<div class=\"meta\"><span>Wikipedia · Events</span><span>ev {}</span></div>",
+            "<div class=\"meta\"><span>Wikipedia (en) · Events</span><span>ev {}</span></div>",
             &id[..8]
         )));
         assert!(html.contains("<p class=\"excerpt\">first &lt;line&gt;\nsecond &amp; line</p>"));
@@ -1427,20 +1431,20 @@ mod tests {
     #[test]
     fn facts_label_each_list_and_preserve_host_fallbacks() {
         let cases = [
-            ("events", "Wikipedia · Events"),
-            ("births", "Wikipedia · Births"),
-            ("deaths", "Wikipedia · Deaths"),
-            ("holidays", "Wikipedia · Holidays"),
-            ("selected", "Wikipedia · Selected"),
-            ("all", "api.wikimedia.org"),
+            ("en", "events", "Wikipedia (en) · Events"),
+            ("de", "births", "Wikipedia (de) · Births"),
+            ("fr", "deaths", "Wikipedia (fr) · Deaths"),
+            ("es", "holidays", "Wikipedia (es) · Holidays"),
+            ("en", "selected", "Wikipedia (en) · Selected"),
+            ("en", "all", "api.wikimedia.org"),
         ];
         let mut records: Vec<_> = cases
             .iter()
-            .map(|(list, _)| {
+            .map(|(edition, list, _)| {
                 sourced(
                     "ada",
                     &format!(
-                        "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/{list}/10/26"
+                        "https://api.wikimedia.org/feed/v1/wikipedia/{edition}/onthisday/{list}/10/26"
                     ),
                     0,
                     list,
@@ -1450,10 +1454,11 @@ mod tests {
         records.push(sourced("ada", "https://example.com/fact", 0, "other"));
         records.push(sourced("ada", "data:text/plain,fact", 0, "hostless"));
         let html = render_front(&page(&[], &[], &records, None, Paint::NoRecord));
+        assert!(!html.contains("Wikipedia · "));
         for (fact, label) in records.iter().zip(
             cases
                 .iter()
-                .map(|(_, label)| *label)
+                .map(|(_, _, label)| *label)
                 .chain(["example.com", "source"]),
         ) {
             let marker = format!("<article class=\"card fact\" id=\"fact-{}\"", fact.id().0);
@@ -1467,7 +1472,7 @@ mod tests {
             assert!(article.contains(label), "{label}");
         }
         assert!(html.contains(
-            "What the peers fetched. Each can afford three fetches per activation, from five lists."
+            "What the peers fetched. Each can afford three fetches per activation, from five lists of its Wikipedia edition."
         ));
     }
 
@@ -1503,7 +1508,7 @@ mod tests {
         assert_eq!(html.matches("shared-excerpt").count(), 1);
         assert!(html.contains("fetched by Wren, Robin"));
         assert!(html.contains("cited 2 times"));
-        assert!(html.contains("Wikipedia · Events"));
+        assert!(html.contains("Wikipedia (en) · Events"));
         assert_eq!(html.matches("id=\"fact-").count(), 2);
         assert!(!html.contains("All 2 facts"));
         assert_clean(&html);
@@ -1530,7 +1535,7 @@ mod tests {
         assert!(!broad.contains("distinct-excerpt-12"));
         assert!(broad.contains("All 13 facts"));
         assert!(broad.contains("href=\"days/1970-01-01.html\""));
-        assert!(broad.contains("Wikipedia · Births"));
+        assert!(broad.contains("Wikipedia (en) · Births"));
         assert!(broad.contains("not cited"));
         assert_clean(&broad);
     }

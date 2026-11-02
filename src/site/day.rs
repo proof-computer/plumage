@@ -516,7 +516,7 @@ fn push_facts(out: &mut String, page: &DayPage<'_>) {
         push_escaped(out, id);
         out.push_str("\" style=\"flex:1 1 220px\"><div class=\"meta\"><span>");
         let source = super::front::source_label(fact);
-        push_escaped(out, source);
+        push_escaped(out, &source);
         out.push_str(" · ev ");
         push_escaped(out, &id.chars().take(8).collect::<String>());
         out.push_str("</span></div><p class=\"excerpt\">");
@@ -976,21 +976,21 @@ mod tests {
     #[test]
     fn facts_label_each_list_and_preserve_host_fallbacks() {
         let cases = [
-            ("events", "Wikipedia · Events"),
-            ("births", "Wikipedia · Births"),
-            ("deaths", "Wikipedia · Deaths"),
-            ("holidays", "Wikipedia · Holidays"),
-            ("selected", "Wikipedia · Selected"),
-            ("all", "api.wikimedia.org"),
+            ("en", "events", "Wikipedia (en) · Events"),
+            ("de", "births", "Wikipedia (de) · Births"),
+            ("fr", "deaths", "Wikipedia (fr) · Deaths"),
+            ("es", "holidays", "Wikipedia (es) · Holidays"),
+            ("en", "selected", "Wikipedia (en) · Selected"),
+            ("en", "all", "api.wikimedia.org"),
         ];
         let mut records: Vec<_> = cases
             .iter()
-            .map(|(list, _)| {
+            .map(|(edition, list, _)| {
                 Evidence::new(
                     "ada".into(),
                     "run".into(),
                     Url::parse(&format!(
-                        "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/{list}/10/26"
+                        "https://api.wikimedia.org/feed/v1/wikipedia/{edition}/onthisday/{list}/10/26"
                     ))
                     .unwrap(),
                     0,
@@ -1005,11 +1005,21 @@ mod tests {
             0,
             "other",
         ));
+        records.push(Evidence::new(
+            "ada".into(),
+            "run".into(),
+            Url::parse("data:text/plain,fact").unwrap(),
+            0,
+            "hostless",
+        ));
         let html = render_day(&page(&[], &[], &records, None, Paint::NoRecord));
-        for (fact, label) in records
-            .iter()
-            .zip(cases.iter().map(|(_, label)| *label).chain(["example.com"]))
-        {
+        assert!(!html.contains("Wikipedia · "));
+        for (fact, label) in records.iter().zip(
+            cases
+                .iter()
+                .map(|(_, _, label)| *label)
+                .chain(["example.com", "source"]),
+        ) {
             let marker = format!("<article class=\"card fact\" id=\"fact-{}\"", fact.id().0);
             let article = html
                 .split_once(&marker)
@@ -1067,8 +1077,8 @@ mod tests {
         ];
         let html = render_day(&page(&[], &arguments, &records, None, Paint::NoRecord));
         for (fact, label, phrase) in [
-            (&records[0], "Wikipedia · Events", "cited once"),
-            (&records[1], "Wikipedia · Births", "cited 2 times"),
+            (&records[0], "Wikipedia (en) · Events", "cited once"),
+            (&records[1], "Wikipedia (en) · Births", "cited 2 times"),
             (&records[2], "example.com", "not cited"),
         ] {
             let marker = format!("<article class=\"card fact\" id=\"fact-{}\"", fact.id().0);

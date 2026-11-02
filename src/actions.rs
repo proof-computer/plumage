@@ -242,6 +242,19 @@ mod tests {
     }
 
     #[test]
+    fn fetch_accepts_another_peers_edition_but_refuses_unlisted_editions() {
+        for (edition, expected) in [("de", Ok(())), ("it", Err(Refusal::HostNotAllowed))] {
+            let action = Action::Fetch {
+                url: Url::parse(&format!(
+                    "https://api.wikimedia.org/feed/v1/wikipedia/{edition}/onthisday/events/10/23"
+                ))
+                .unwrap(),
+            };
+            assert_eq!(validate(&action, &context(&[], 0)), expected);
+        }
+    }
+
+    #[test]
     fn vote_requires_own_evidence_in_this_run_and_own_argument() {
         let vote = Action::Vote {
             colour: Colour::Blue,
