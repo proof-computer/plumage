@@ -5,8 +5,10 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 // ADR-0271 §5: Wikipedia's five lists for the date, whole lines up to 600 characters.
+// ADR-0272 §1: on one of four editions, chosen by a hash of the peer id.
 pub const EXCERPT_CHARS: usize = 600;
 pub const WIKIMEDIA_HOST: &str = "api.wikimedia.org";
+pub const EDITIONS: [&str; 4] = ["en", "de", "fr", "es"];
 pub const LISTS: [&str; 5] = ["events", "births", "deaths", "holidays", "selected"];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -156,6 +158,10 @@ impl Allowlist {
     }
 
     pub fn list(url: &Url) -> Option<&'static str> {
+        Self::source(url).map(|(_, list)| list)
+    }
+
+    pub fn source(url: &Url) -> Option<(&'static str, &'static str)> {
         if url.scheme() != "https"
             || !url.username().is_empty()
             || url.password().is_some()
@@ -166,9 +172,10 @@ impl Allowlist {
         {
             return None;
         }
-        let rest = url
-            .path()
-            .strip_prefix("/feed/v1/wikipedia/en/onthisday/")?;
+        let rest = url.path().strip_prefix("/feed/v1/wikipedia/")?;
+        let (edition, rest) = rest.split_once('/')?;
+        let edition = EDITIONS.into_iter().find(|known| *known == edition)?;
+        let rest = rest.strip_prefix("onthisday/")?;
         let (list, date) = rest.split_once('/')?;
         let list = LISTS.into_iter().find(|known| *known == list)?;
         let bytes = date.as_bytes();
@@ -182,7 +189,7 @@ impl Allowlist {
         {
             return None;
         }
-        Some(list)
+        Some((edition, list))
     }
 }
 
@@ -229,14 +236,16 @@ mod tests {
 
     #[test]
     fn permits_only_the_five_exact_list_shapes() {
-        for list in LISTS {
-            for date in ["10/23", "02/29"] {
-                let url = Url::parse(&format!(
-                    "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/{list}/{date}"
-                ))
-                .unwrap();
-                assert!(Allowlist::permits(&url), "{url}");
-                assert_eq!(Allowlist::list(&url), Some(list));
+        for edition in EDITIONS {
+            for list in LISTS {
+                for date in ["10/23", "02/29"] {
+                    let url = Url::parse(&format!(
+                        "https://api.wikimedia.org/feed/v1/wikipedia/{edition}/onthisday/{list}/{date}"
+                    )).unwrap();
+                    assert_eq!(Allowlist::source(&url), Some((edition, list)));
+                    assert_eq!(Allowlist::list(&url), Some(list));
+                    assert!(Allowlist::permits(&url), "{url}");
+                }
             }
         }
         for url in [
@@ -252,7 +261,11 @@ mod tests {
             WIKI.replace("/events/", "/unknown/"),
             SUN.to_owned(),
             SUN.replace("2026-10-23", "2024-02-29"),
-            WIKI.replace("/en/", "/de/"),
+            WIKI.replace("/en/", "/it/"),
+            WIKI.replace("/en/", "/zh/"),
+            WIKI.replace("/en/", "/EN/"),
+            WIKI.replace("/en/", "/en-gb/"),
+            WIKI.replace("/en/", "//"),
             WIKI.replace("10/23", "1/23"),
             WIKI.replace("10/23", "10-23"),
             WIKI.replace("10/23", "13/23"),
@@ -276,7 +289,9 @@ mod tests {
             format!("{SUN}&formatted=0"),
             "https://api.sunrise-sunset.org/json".to_owned(),
         ] {
-            assert!(!Allowlist::permits(&Url::parse(&url).unwrap()), "{url}");
+            let url = Url::parse(&url).unwrap();
+            assert_eq!(Allowlist::source(&url), None, "{url}");
+            assert!(!Allowlist::permits(&url), "{url}");
         }
     }
 
@@ -342,7 +357,11 @@ mod tests {
 
     #[test]
     fn deserialization_rejects_former_sources_but_accepts_old_excerpt_bound() {
-        for url in [WIKI.replace("/events/", "/all/"), SUN.to_owned()] {
+        for url in [
+            WIKI.replace("/events/", "/all/"),
+            WIKI.replace("/en/", "/it/"),
+            SUN.to_owned(),
+        ] {
             let record = evidence("a", "run", &url, 0, "old");
             let error = serde_json::from_value::<Evidence>(serde_json::to_value(record).unwrap())
                 .unwrap_err();
@@ -354,6 +373,20 @@ mod tests {
         value["excerpt"] = serde_json::json!("🦜".repeat(600));
         let recovered: Evidence = serde_json::from_value(value).unwrap();
         assert_eq!(recovered.excerpt(), "🦜".repeat(600));
+    }
+
+    #[test]
+    fn other_editions_round_trip_as_evidence() {
+        for url in [
+            "https://api.wikimedia.org/feed/v1/wikipedia/de/onthisday/births/10/23",
+            "https://api.wikimedia.org/feed/v1/wikipedia/es/onthisday/holidays/02/29",
+        ] {
+            let record = evidence("a", "run", url, 0, "fact");
+            let encoded = serde_json::to_value(&record).unwrap();
+            let decoded: Evidence = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded, record);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
     }
 
     #[test]

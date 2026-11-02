@@ -86,7 +86,7 @@ async fn completion(State(palette): State<Palette>, Json(request): Json<Value>) 
     let action = if messages <= 2 {
         let day_number = prompt.get(2).and_then(Value::as_u64).expect("day number");
         let day = plumage::day::Day::from_ms(day_number * 86_400_000);
-        json!({"action": "fetch", "url": plumage::fetch::sources(&day)[0]})
+        json!({"action": "fetch", "url": plumage::fetch::sources(&day, &you)[0]})
     } else if messages == 4 {
         let text = if palette.lab {
             format!("argument from {you}")

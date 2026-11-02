@@ -1,5 +1,5 @@
 //! The one place plumage touches the outside web: five allowlisted lists on one host,
-//! read into bounded evidence. Fetched text stays data.
+//! on one of four editions per peer, read into bounded evidence. Fetched text stays data.
 
 use std::{fmt, future::Future, path::PathBuf, time::Duration};
 
@@ -9,7 +9,7 @@ use url::Url;
 use crate::{
     actions::seed_offset,
     day::Day,
-    evidence::{Allowlist, Evidence, LISTS, WIKIMEDIA_HOST},
+    evidence::{Allowlist, EDITIONS, Evidence, LISTS, WIKIMEDIA_HOST},
 };
 
 /// Refuse a response body larger than this, counted while it is read.
@@ -22,12 +22,18 @@ pub const USER_AGENT: &str = concat!(
     " (+https://github.com/proof-computer/plumage)"
 );
 
-/// The five owner-approved URLs for `day`, all shapes [`Allowlist::permits`].
-pub fn sources(day: &Day) -> [Url; 5] {
+/// The Wikipedia edition selected by the peer id's SHA-256 reduction.
+pub fn edition_for(peer_id: &str) -> &'static str {
+    EDITIONS[seed_offset(peer_id, EDITIONS.len())]
+}
+
+/// The five owner-approved URLs for `day` and this peer, all permitted by the allowlist.
+pub fn sources(day: &Day, peer_id: &str) -> Vec<Url> {
     let (month, day_of_month) = day.month_day();
-    LISTS.map(|list| parse_source(&format!(
-        "https://{WIKIMEDIA_HOST}/feed/v1/wikipedia/en/onthisday/{list}/{month:02}/{day_of_month:02}"
-    )))
+    let edition = edition_for(peer_id);
+    LISTS.into_iter().map(|list| parse_source(&format!(
+        "https://{WIKIMEDIA_HOST}/feed/v1/wikipedia/{edition}/onthisday/{list}/{month:02}/{day_of_month:02}"
+    ))).collect()
 }
 
 fn parse_source(url: &str) -> Url {
@@ -263,26 +269,63 @@ mod tests {
     }
 
     #[test]
-    fn sources_for_a_real_day_are_the_five_permitted_lists_in_order() {
+    fn editions_are_selected_by_the_whole_peer_id_hash() {
+        for (peer, expected) in [("p00", "en"), ("b", "de"), ("p01", "fr"), ("a", "es")] {
+            assert_eq!(edition_for(peer), expected);
+        }
+        for peer in ["p00", "p01", "p02", "p03", "a", "b", "c", "d"] {
+            assert_eq!(edition_for(peer), EDITIONS[seed_offset(peer, 4)]);
+        }
+    }
+
+    #[test]
+    fn sources_for_a_real_day_are_the_peers_five_permitted_lists_in_order() {
         for (date, suffix) in [("2026-10-26", "10/26"), ("2028-02-29", "02/29")] {
-            let urls = sources(&day(date));
-            assert_eq!(urls.len(), 5);
-            for (url, list) in urls.iter().zip(LISTS) {
-                assert_eq!(
-                    url.as_str(),
-                    format!(
-                        "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/{list}/{suffix}"
-                    )
-                );
-                assert!(Allowlist::permits(url));
+            for peer in ["p00", "b", "p01", "a"] {
+                let urls = sources(&day(date), peer);
+                assert_eq!(urls.len(), 5);
+                for (url, list) in urls.iter().zip(LISTS) {
+                    let edition = edition_for(peer);
+                    assert_eq!(
+                        url.as_str(),
+                        format!(
+                            "https://api.wikimedia.org/feed/v1/wikipedia/{edition}/onthisday/{list}/{suffix}"
+                        )
+                    );
+                    assert!(Allowlist::permits(url));
+                    assert_eq!(Allowlist::source(url), Some((edition, list)));
+                }
             }
         }
         assert!("2026-02-29".parse::<Day>().is_err());
     }
 
     #[test]
+    fn german_births_rotate_as_english_and_reject_the_wrong_list() {
+        let body = br#"{"births":[{"year":1903,"text":"Erster"},{"text":"Zweiter"},{"year":1955,"text":"Dritter"}]}"#;
+        let kept = ["1903: Erster", "Zweiter", "1955: Dritter"];
+        let german = &sources(&day("2026-10-26"), "b")[1];
+        let english = &sources(&day("2026-10-26"), "p00")[1];
+        for prior in [0, 1] {
+            let text = extract(german, body, "a", prior).unwrap();
+            assert_eq!(text.lines().count(), 3);
+            assert_eq!(
+                text.lines().next().unwrap(),
+                kept[(seed_offset("a", 3) + prior) % 3]
+            );
+            assert_eq!(text, extract(english, body, "a", prior).unwrap());
+        }
+        assert_eq!(
+            extract(german, br#"{"events":[{"text":"fact"}]}"#, "a", 0)
+                .unwrap_err()
+                .code,
+            "source_invalid"
+        );
+    }
+
+    #[test]
     fn wikimedia_events_rotate_from_the_peer_seed() {
-        let url = &sources(&day("2026-10-26"))[0];
+        let url = &sources(&day("2026-10-26"), "p00")[0];
         let body = serde_json::to_vec(&serde_json::json!({
             "events": [
                 {"year": 1901, "text": "one"},
@@ -326,7 +369,7 @@ mod tests {
 
     #[test]
     fn every_list_extracts_text_rotates_independently_and_rejects_invalid_shapes() {
-        for (url, list) in sources(&day("2026-10-26")).iter().zip(LISTS) {
+        for (url, list) in sources(&day("2026-10-26"), "p00").iter().zip(LISTS) {
             let entries = serde_json::json!([
                 {"year":1901,"text":"one"}, {"text":"two"},
                 {"year":1903,"text":5}, {"year":"1904","text":"four"},
@@ -369,13 +412,13 @@ mod tests {
                 );
             }
         }
-        let url = &sources(&day("2026-10-26"))[1];
+        let url = &sources(&day("2026-10-26"), "p00")[1];
         let body = serde_json::to_vec(&serde_json::json!({"births": (0..6).map(|i| serde_json::json!({"text":i.to_string()})).collect::<Vec<_>>()})).unwrap();
         assert_eq!(
             extract(url, &body, "a", 0).unwrap().lines().next().unwrap(),
             seed_offset("a", 6).to_string()
         );
-        let url = &sources(&day("2026-10-26"))[3];
+        let url = &sources(&day("2026-10-26"), "p00")[3];
         assert_eq!(
             extract(url, br#"{"holidays":[{"text":"A holiday"}]}"#, "a", 0).unwrap(),
             "A holiday"
@@ -389,10 +432,24 @@ mod tests {
         let file = dir.path().join("api.wikimedia.org.json");
         std::fs::write(&file, body).unwrap();
         let source = FixtureSource::new(dir.path());
-        let urls = sources(&day("2026-10-26"));
+        let urls = sources(&day("2026-10-26"), "p00");
         assert_eq!(source.get(&urls[0]).await.unwrap(), body);
-        for url in &urls {
-            assert_eq!(source.get(url).await.unwrap(), body);
+        for peer in ["p00", "b"] {
+            let urls = sources(&day("2026-10-26"), peer);
+            for url in &urls {
+                assert_eq!(source.get(url).await.unwrap(), body);
+            }
+            let evidence = fetch(&source, &urls[0], peer, "run", 0, 0).await.unwrap();
+            assert_eq!(evidence.url(), &urls[0]);
+            for url in &urls[1..] {
+                assert_eq!(
+                    fetch(&source, url, peer, "run", 0, 0)
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "source_invalid"
+                );
+            }
         }
         std::fs::remove_file(&file).unwrap();
         assert_eq!(source.get(&urls[0]).await.unwrap_err().code, "fetch_failed");
@@ -419,6 +476,7 @@ mod tests {
         };
         for text in [
             "https://example.com/",
+            "https://api.wikimedia.org/feed/v1/wikipedia/it/onthisday/events/10/26",
             "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/10/26",
             "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/10/26?x=1",
         ] {
@@ -440,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_stores_the_digest_of_the_whole_text() {
-        let url = sources(&day("2026-10-26"))[0].clone();
+        let url = sources(&day("2026-10-26"), "p00")[0].clone();
         let prose = "y".repeat(700);
         let body = serde_json::to_vec(&serde_json::json!({
             "events": [{"year": 2025, "text": prose}]
