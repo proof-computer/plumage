@@ -1,10 +1,10 @@
 //! One peer's ledger and the day's evidence, arguments and votes.
 
 use crate::actions::{self, Action, Context, Refusal};
-use crate::closing;
 use crate::error::{Error, Result};
 use crate::evidence::{Evidence, EvidenceId};
-use crate::record::{REPLY_SCHEMA, Record, SCHEMA};
+use crate::record::{REPLY_SCHEMA, Record, SCHEMA, STANCE_SCHEMA};
+use crate::{closing, tally};
 use forthebirds_store::{ActionRecord, EvidenceRecord, Host, Ledger, LedgerConfig, LedgerRecord};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +15,7 @@ pub struct DayIndex {
     pub evidence: BTreeMap<String, (String, Evidence)>,
     pub arguments: Vec<Argument>,
     pub votes: Vec<closing::Vote>,
+    pub stances: BTreeMap<String, tally::Stance>,
     pub latest_ms: u64,
     /// Ledger record ids already applied. Votes do not carry that id, so a
     /// repeat of the same record cannot be recognised from the vote alone.
@@ -108,9 +109,10 @@ impl Book {
                 "a fetch is recorded as evidence",
             ));
         }
-        if let Action::Argue { .. } = &action {
+        if matches!(&action, Action::Argue { .. } | Action::Stance { .. }) {
             let evidence = self.indexed_evidence();
-            let (arguments, other_records) = self.lock_index().reply_records();
+            let index = self.index();
+            let (arguments, other_records) = index.reply_records();
             let context = Context {
                 author: &self.ledger.config.peer_id,
                 run: &self.ledger.config.run_id,
@@ -118,10 +120,12 @@ impl Book {
                 fetches_this_activation: 0,
                 arguments: &arguments,
                 other_records: &other_records,
+                stance: index.stances.get(&self.ledger.config.peer_id),
             };
             actions::validate(&action, &context).map_err(refused)?;
         }
         let schema = match &action {
+            Action::Stance { .. } => STANCE_SCHEMA,
             Action::Argue {
                 reply_to: Some(_), ..
             } => REPLY_SCHEMA,
@@ -154,11 +158,12 @@ impl Book {
     }
 
     fn refuse_imported_argue(&self, record: &ActionRecord<Action>) -> Result<()> {
-        let Action::Argue { .. } = &record.action else {
+        let (Action::Argue { .. } | Action::Stance { .. }) = &record.action else {
             return Ok(());
         };
         let evidence = self.indexed_evidence();
-        let (arguments, other_records) = self.lock_index().reply_records();
+        let index = self.index();
+        let (arguments, other_records) = index.reply_records();
         let context = Context {
             author: &record.author,
             run: &record.run_id,
@@ -166,6 +171,7 @@ impl Book {
             fetches_this_activation: 0,
             arguments: &arguments,
             other_records: &other_records,
+            stance: index.stances.get(&record.author),
         };
         if let Err(refusal) = actions::validate(&record.action, &context) {
             let code = if matches!(refusal, Refusal::UnknownCitation | Refusal::UnknownReply) {
@@ -240,6 +246,28 @@ fn remember(index: &mut DayIndex, record: &Record) {
                             <= (argument.at_ms, argument.id.as_str())
                     });
                     index.arguments.insert(position, argument);
+                }
+                Action::Stance {
+                    prefer,
+                    accept,
+                    refuse,
+                    cites,
+                } => {
+                    let stance = tally::Stance {
+                        id: action.id.clone(),
+                        author: action.author.clone(),
+                        at_ms: action.created_at_ms,
+                        prefer: prefer.clone(),
+                        accept: accept.clone(),
+                        refuse: refuse.clone(),
+                        cites: cites.clone(),
+                    };
+                    let keep_incoming = index.stances.get(&action.author).is_none_or(|kept| {
+                        (stance.at_ms, stance.id.as_str()) > (kept.at_ms, kept.id.as_str())
+                    });
+                    if keep_incoming {
+                        index.stances.insert(action.author.clone(), stance);
+                    }
                 }
                 Action::Vote { colour } => {
                     let vote = closing::Vote {
@@ -798,5 +826,171 @@ mod tests {
             .unwrap_err();
         assert_eq!(vote_reply.code, "invalid_action");
         assert!(vote_reply.message.contains("ReplyToNonArgument"));
+    }
+
+    fn stance_action(prefer: Colour, cites: Vec<EvidenceId>) -> Action {
+        Action::Stance {
+            prefer: vec![prefer],
+            accept: vec![Colour::Teal],
+            refuse: vec![Colour::Red],
+            cites,
+        }
+    }
+
+    #[tokio::test]
+    async fn stance_write_recovery_and_import_order_keep_the_newest_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("author.redb");
+        let book = Book::open(config(&path, "peer-a")).await.unwrap();
+        let evidence = evidence_for("peer-a");
+        let saved = book.save_evidence(evidence.clone()).await.unwrap();
+        let first = book
+            .write(
+                "stance-1",
+                stance_action(Colour::Blue, vec![evidence.id().clone()]),
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.schema, STANCE_SCHEMA);
+        let index = book.index();
+        let stance = &index.stances["peer-a"];
+        assert_eq!(stance.id, first.id);
+        assert_eq!(stance.at_ms, first.created_at_ms);
+        assert_eq!(stance.author, "peer-a");
+        assert_eq!(stance.prefer, [Colour::Blue]);
+        assert_eq!(stance.accept, [Colour::Teal]);
+        assert_eq!(stance.refuse, [Colour::Red]);
+        assert_eq!(stance.cites, [evidence.id().clone()]);
+        assert_eq!(stance.vote_choices(), [Colour::Blue, Colour::Teal]);
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let second = book
+            .write(
+                "stance-2",
+                stance_action(Colour::Green, vec![evidence.id().clone()]),
+                1,
+            )
+            .await
+            .unwrap();
+        let index = book.index();
+        assert_eq!(index.stances.len(), 1);
+        assert_eq!(index.stances["peer-a"].id, second.id);
+        drop(book);
+        let reopened = Book::open(config(&path, "peer-a")).await.unwrap();
+        assert_eq!(reopened.index(), index);
+        for (name, records) in [
+            (
+                "forward",
+                vec![Record::from(first.clone()), Record::from(second.clone())],
+            ),
+            (
+                "reverse",
+                vec![Record::from(second.clone()), Record::from(first.clone())],
+            ),
+        ] {
+            let reader = open_at(dir.path(), name, "peer-b").await;
+            reader
+                .ledger()
+                .import(&reader, vec![Record::from(saved.clone())])
+                .await
+                .unwrap();
+            for record in records {
+                reader.ledger().import(&reader, vec![record]).await.unwrap();
+            }
+            assert_eq!(reader.index().stances, index.stances);
+            reader
+                .ledger()
+                .import(&reader, vec![Record::from(second.clone())])
+                .await
+                .unwrap();
+            assert_eq!(reader.index().stances.len(), 1);
+        }
+        // Equal times are ordered by id regardless of delivery order.
+        let mut tied = second.clone();
+        tied.created_at_ms = first.created_at_ms;
+        for records in [
+            [Record::from(first.clone()), Record::from(tied.clone())],
+            [Record::from(tied.clone()), Record::from(first.clone())],
+        ] {
+            let mut index = DayIndex::default();
+            for r in records {
+                remember(&mut index, &r);
+            }
+            assert_eq!(
+                index.stances["peer-a"].id,
+                first.id.clone().max(tied.id.clone())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stance_import_needs_own_evidence_and_invalid_stances_never_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let author = open_at(dir.path(), "a.redb", "peer-a").await;
+        let evidence = evidence_for("peer-a");
+        let saved = author.save_evidence(evidence.clone()).await.unwrap();
+        let record = author
+            .write(
+                "stance",
+                stance_action(Colour::Blue, vec![evidence.id().clone()]),
+                1,
+            )
+            .await
+            .unwrap();
+        let reader = open_at(dir.path(), "b.redb", "peer-b").await;
+        let error = reader
+            .ledger()
+            .import(&reader, vec![Record::from(record.clone())])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "missing_reference");
+        assert!(error.message.contains("UnknownCitation"));
+        assert!(reader.index().stances.is_empty());
+        reader
+            .ledger()
+            .import(&reader, vec![Record::from(saved)])
+            .await
+            .unwrap();
+        reader
+            .ledger()
+            .import(&reader, vec![Record::from(record)])
+            .await
+            .unwrap();
+        let foreign = reader
+            .ledger()
+            .execute(
+                &reader,
+                "foreign",
+                stance_action(Colour::Blue, vec![evidence.id().clone()]),
+                1,
+                STANCE_SCHEMA,
+            )
+            .await
+            .unwrap();
+        let error = author
+            .ledger()
+            .import(&author, vec![Record::from(foreign)])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_action");
+        assert!(error.message.contains("ForeignCitation"));
+        let invalid = stance_action(Colour::Blue, vec![]);
+        let before = author.ledger().page(None, 32).await.unwrap().records.len();
+        let error = author
+            .write("invalid", invalid.clone(), 1)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "refused");
+        assert!(error.message.contains("StanceRefusalUncited"));
+        let error = author
+            .ledger()
+            .execute(&author, "invalid", invalid, 1, STANCE_SCHEMA)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_action");
+        assert_eq!(
+            author.ledger().page(None, 32).await.unwrap().records.len(),
+            before
+        );
     }
 }

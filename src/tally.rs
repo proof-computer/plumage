@@ -17,6 +17,7 @@ pub const VOTE_CHANGES_RULE: &str = "A vote change is a vote whose colour differ
 pub const REPLIES_RULE: &str = "A reply is an argument that names another author's argument as reply_to. The day's reply count is the number of such arguments.";
 pub const REPLY_LED_CHANGES_RULE: &str = "A reply-led change is a vote change (see the vote change rule) by an author who received at least one reply after that author's previous vote and at or before the changing vote. Each change counts once, however many replies came before it.";
 pub const CURVE_RULE: &str = "The curve is the colour counts over the live voters at every whole hour from one hour after the day's open through the day's close.";
+pub const STANCE_BANDS_RULE: &str = "For each colour, preferred is the number of live voters at the time whose current stance lists it in prefer; accepted is the number whose current stance lists it in prefer or accept; refused is the number whose current stance lists it in refuse. An author's current stance is that author's newest stance record. An author who is not a live voter at the time, or who has declared no stance, is not counted.";
 pub const FETCHES_RULE: &str =
     "An author's fetch count is the number of evidence records that author stored.";
 pub const VOTES_CAST_RULE: &str =
@@ -58,6 +59,64 @@ pub fn counts(votes: &[Vote], open_ms: u64, at_ms: u64) -> BTreeMap<Colour, usiz
         *counts.entry(*colour).or_default() += 1;
     }
     counts
+}
+
+/// An author's newest declared stance in this day's ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Stance {
+    pub id: String,
+    pub author: String,
+    pub at_ms: u64,
+    pub prefer: Vec<Colour>,
+    pub accept: Vec<Colour>,
+    pub refuse: Vec<Colour>,
+    pub cites: Vec<EvidenceId>,
+}
+
+impl Stance {
+    pub fn vote_choices(&self) -> Vec<Colour> {
+        self.prefer.iter().chain(&self.accept).copied().collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StanceBands {
+    pub preferred: usize,
+    pub accepted: usize,
+    pub refused: usize,
+}
+
+/// Counts over current stances; see [`STANCE_BANDS_RULE`].
+pub fn stance_bands<'a>(
+    stances: impl IntoIterator<Item = &'a Stance>,
+    votes: &[Vote],
+    open_ms: u64,
+    at_ms: u64,
+) -> BTreeMap<Colour, StanceBands> {
+    let live: BTreeSet<_> = live_voters(votes, open_ms, at_ms).into_iter().collect();
+    let mut current: BTreeMap<&str, &Stance> = BTreeMap::new();
+    for stance in stances {
+        let kept = current.entry(&stance.author).or_insert(stance);
+        if (stance.at_ms, stance.id.as_str()) > (kept.at_ms, kept.id.as_str()) {
+            *kept = stance;
+        }
+    }
+    Colour::ALL
+        .into_iter()
+        .map(|colour| {
+            let mut bands = StanceBands::default();
+            for stance in current
+                .values()
+                .filter(|stance| live.contains(&stance.author))
+            {
+                let preferred = stance.prefer.contains(&colour);
+                bands.preferred += usize::from(preferred);
+                bands.accepted += usize::from(preferred || stance.accept.contains(&colour));
+                bands.refused += usize::from(stance.refuse.contains(&colour));
+            }
+            (colour, bands)
+        })
+        .collect()
 }
 
 /// One reply on the day clock: the replying argument's time, and the author of
@@ -518,6 +577,69 @@ mod tests {
         assert_eq!(
             days_per_colour([Some(Blue), None, Some(Blue), Some(Red)]),
             (BTreeMap::from([(Blue, 2), (Red, 1)]), 1)
+        );
+    }
+
+    #[test]
+    fn stance_bands_count_only_live_authors_once_and_include_zero_colours() {
+        use Colour::{Navy, Teal};
+        let stance = |author: &str, prefer, accept, refuse| Stance {
+            id: author.into(),
+            author: author.into(),
+            at_ms: 0,
+            prefer,
+            accept,
+            refuse,
+            cites: vec![],
+        };
+        let stances = [
+            stance("a", vec![Blue], vec![Teal], vec![Red]),
+            stance("b", vec![Teal], vec![], vec![Blue]),
+            stance("c", vec![Blue], vec![], vec![]),
+            stance("d", vec![Navy], vec![], vec![Blue]),
+        ];
+        assert_eq!(stances[0].vote_choices(), [Blue, Teal]);
+        let votes = [
+            vote("c", Blue, 9 * HOUR_MS),
+            vote("a", Blue, 10 * HOUR_MS),
+            vote("b", Teal, 10 * HOUR_MS + HOUR_MS / 2),
+        ];
+        let bands = stance_bands(&stances, &votes, 0, 10 * HOUR_MS + HOUR_MS / 2);
+        let band = |preferred, accepted, refused| StanceBands {
+            preferred,
+            accepted,
+            refused,
+        };
+        assert_eq!(bands.len(), 24);
+        for colour in Colour::ALL {
+            assert_eq!(
+                bands[&colour],
+                match colour {
+                    Blue => band(1, 1, 1),
+                    Teal => band(1, 2, 0),
+                    Red => band(0, 0, 1),
+                    _ => band(0, 0, 0),
+                }
+            );
+        }
+        let early = stance_bands(&stances, &votes, 0, 9 * HOUR_MS + HOUR_MS / 2);
+        assert_eq!(early[&Blue], band(1, 1, 0));
+        assert_eq!(early[&Teal], band(0, 0, 0));
+        let late = stance_bands(&stances, &votes, 0, 11 * HOUR_MS);
+        assert_eq!(late[&Blue], band(0, 0, 1));
+        assert_eq!(late[&Teal], band(1, 1, 0));
+        assert_eq!(
+            stance_bands([&stances[0], &stances[0]], &votes, 0, 10 * HOUR_MS)[&Blue],
+            band(1, 1, 0)
+        );
+        assert!(
+            stance_bands([], &votes, 0, 10 * HOUR_MS)
+                .values()
+                .all(|b| *b == StanceBands::default())
+        );
+        assert_eq!(
+            STANCE_BANDS_RULE,
+            "For each colour, preferred is the number of live voters at the time whose current stance lists it in prefer; accepted is the number whose current stance lists it in prefer or accept; refused is the number whose current stance lists it in refuse. An author's current stance is that author's newest stance record. An author who is not a live voter at the time, or who has declared no stance, is not counted."
         );
     }
 }

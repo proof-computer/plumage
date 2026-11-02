@@ -1,4 +1,4 @@
-//! One bounded activation: fetch, argue, vote, then stop.
+//! One bounded activation: fetch, stance, argue, vote, then stop.
 
 use forthebirds_inference::model::{Model, Prepared};
 use forthebirds_runtime::activation::{Activation, Limits, Step};
@@ -62,11 +62,21 @@ impl<'a, S: Source> Activation for PeerActivation<'a, S> {
 
     async fn schema_for_turn(&mut self, _turn: usize, _context: &Value) -> Result<Option<Value>> {
         let run = &self.book.ledger().config.run_id;
-        let gate = prompt::vote_gate(&self.book.index(), self.peer_id, run);
+        let index = self.book.index();
+        let gate = prompt::vote_gate(&index, self.peer_id, run);
+        let choices = gate
+            .may_vote()
+            .then(|| {
+                index
+                    .stances
+                    .get(self.peer_id)
+                    .map(crate::tally::Stance::vote_choices)
+            })
+            .flatten();
         Ok(Some(prompt::schema_allowing(
             &self.day,
             self.peer_id,
-            gate.may_vote(),
+            choices.as_deref(),
         )))
     }
 
@@ -127,7 +137,8 @@ impl<'a, S: Source> Activation for PeerActivation<'a, S> {
         };
         let run = self.book.ledger().config.run_id.clone();
         let own = own_evidence(self.book, self.peer_id, &run);
-        let (arguments, other_records) = self.book.index().reply_records();
+        let index = self.book.index();
+        let (arguments, other_records) = index.reply_records();
         let check = actions::Context {
             author: self.peer_id,
             run: &run,
@@ -135,6 +146,7 @@ impl<'a, S: Source> Activation for PeerActivation<'a, S> {
             fetches_this_activation: self.completed_fetches,
             arguments: &arguments,
             other_records: &other_records,
+            stance: index.stances.get(self.peer_id),
         };
         if let Err(refusal) = actions::validate(&action, &check) {
             let mut result = json!({"refused": format!("{refusal:?}")});
@@ -146,6 +158,7 @@ impl<'a, S: Source> Activation for PeerActivation<'a, S> {
         match action {
             Action::Fetch { url } => self.fetch(url).await,
             Action::Argue { .. } => self.argue(operation, action).await,
+            Action::Stance { .. } => self.stance(operation, action).await,
             Action::Vote { colour } => self.vote(operation, action, colour).await,
         }
     }
@@ -194,6 +207,14 @@ impl<'a, S: Source> PeerActivation<'a, S> {
     async fn argue(&self, operation: &str, action: Action) -> Result<Step<Colour>> {
         match self.write_action(operation, action).await {
             Ok(record) => continue_with(json!({"posted": record.id})),
+            Err(error) if soft_write(error.code) => continue_with(json!({"error": error.code})),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn stance(&self, operation: &str, action: Action) -> Result<Step<Colour>> {
+        match self.write_action(operation, action).await {
+            Ok(record) => continue_with(json!({"declared": record.id})),
             Err(error) if soft_write(error.code) => continue_with(json!({"error": error.code})),
             Err(error) => Err(error),
         }
@@ -429,6 +450,11 @@ mod tests {
         ArgueUnknownReply,
         Invalid,
         VoteBlue,
+        StanceBlue,
+        StanceBlueAcceptTeal,
+        StanceRed,
+        StanceRefuseRedUncited,
+        StanceRefuseRedCited,
     }
 
     #[derive(Clone)]
@@ -487,6 +513,44 @@ mod tests {
             Some(Script::FetchWiki) => json!({"action": "fetch", "url": fake.wiki_url}),
             Some(Script::FetchBirths) => {
                 json!({"action": "fetch", "url": fetch::sources(&day(), "p00")[1].to_string()})
+            }
+            Some(
+                Script::StanceBlue
+                | Script::StanceBlueAcceptTeal
+                | Script::StanceRed
+                | Script::StanceRefuseRedUncited
+                | Script::StanceRefuseRedCited,
+            ) => {
+                let prefer = if matches!(step, Some(Script::StanceRed)) {
+                    "red"
+                } else {
+                    "blue"
+                };
+                let accept = if matches!(step, Some(Script::StanceBlueAcceptTeal)) {
+                    vec!["teal"]
+                } else {
+                    vec![]
+                };
+                let refuse = if matches!(
+                    step,
+                    Some(Script::StanceRefuseRedUncited | Script::StanceRefuseRedCited)
+                ) {
+                    vec!["red"]
+                } else {
+                    vec![]
+                };
+                let cites = if matches!(step, Some(Script::StanceRefuseRedCited)) {
+                    let context = fake.last_context.lock().unwrap();
+                    vec![
+                        context["your_evidence"].as_array().unwrap().last().unwrap()["id"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    ]
+                } else {
+                    vec![]
+                };
+                json!({"action":"stance","prefer":[prefer],"accept":accept,"refuse":refuse,"cites":cites})
             }
             Some(Script::ArgueLastEvidence) => {
                 let context = fake.last_context.lock().unwrap().clone();
@@ -577,7 +641,7 @@ mod tests {
             .collect()
     }
 
-    fn assert_schemas(requests: &[(String, Value)], peer: &str, may_vote: &[bool]) {
+    fn assert_schemas(requests: &[(String, Value)], peer: &str, may_vote: &[Option<&[Colour]>]) {
         let completions: Vec<_> = requests
             .iter()
             .filter(|(path, _)| path == "/completion")
@@ -622,7 +686,7 @@ mod tests {
             }
         }
         assert!(pending.is_none());
-        assert_eq!(turns, 3);
+        assert_eq!(turns, 4);
     }
 
     #[test]
@@ -663,6 +727,7 @@ mod tests {
             "p00",
             vec![
                 Script::FetchWiki,
+                Script::StanceBlueAcceptTeal,
                 Script::ArgueLastEvidence,
                 Script::VoteBlue,
             ],
@@ -687,13 +752,27 @@ mod tests {
         let index = book.index();
         assert_eq!(index.evidence.len(), 1);
         assert_eq!(index.arguments.len(), 1);
+        assert_eq!(index.stances.len(), 1);
+        assert_eq!(
+            index.stances["p00"].vote_choices(),
+            [Colour::Blue, Colour::Teal]
+        );
         assert_eq!(index.arguments[0].cites.len(), 1);
         assert_eq!(index.votes.len(), 1);
         assert_eq!(index.votes[0].colour, Colour::Blue);
         assert_eq!(source.calls.load(Ordering::SeqCst), 1);
         settled(&book).await;
         let requests = server.requests.lock().unwrap().clone();
-        assert_schemas(&requests, "p00", &[false, false, true]);
+        let results = tool_results(&requests);
+        assert_eq!(
+            serde_json::from_str::<Value>(&results[1]).unwrap(),
+            json!({"declared":index.stances["p00"].id})
+        );
+        assert_schemas(
+            &requests,
+            "p00",
+            &[None, None, None, Some(&[Colour::Blue, Colour::Teal])],
+        );
 
         let server = fake("p00", vec![Script::VoteBlue]);
         let (url, task) = serve(server.clone()).await;
@@ -715,7 +794,11 @@ mod tests {
         assert_eq!(colour, Colour::Blue);
         assert_eq!(book.index().votes.len(), 2);
         assert_eq!(source.calls.load(Ordering::SeqCst), 1);
-        assert_schemas(&server.requests.lock().unwrap(), "p00", &[true]);
+        assert_schemas(
+            &server.requests.lock().unwrap(),
+            "p00",
+            &[Some(&[Colour::Blue, Colour::Teal])],
+        );
     }
 
     #[tokio::test]
@@ -732,6 +815,7 @@ mod tests {
                 Script::FetchWiki,
                 Script::FetchWiki,
                 Script::FetchWiki,
+                Script::StanceBlue,
                 Script::ArgueLastEvidence,
                 Script::VoteBlue,
             ],
@@ -759,7 +843,11 @@ mod tests {
         let requests = server.requests.lock().unwrap().clone();
         let results = tool_results(&requests);
         assert_eq!(results[3], r#"{"refused":"BudgetExhausted"}"#);
-        assert_schemas(&requests, "p00", &[false, false, false, false, false, true]);
+        assert_schemas(
+            &requests,
+            "p00",
+            &[None, None, None, None, None, None, Some(&[Colour::Blue])],
+        );
     }
 
     #[tokio::test]
@@ -776,6 +864,7 @@ mod tests {
                 Script::ArgueUnknown,
                 Script::VoteBlue,
                 Script::FetchWiki,
+                Script::StanceBlue,
                 Script::ArgueLastEvidence,
                 Script::VoteBlue,
             ],
@@ -808,7 +897,11 @@ mod tests {
             result,
             json!({"refused": "VoteBeforeReading", "reason": "fetch one source and post one argument first; a vote needs both in this run"})
         );
-        assert_schemas(&requests, "p00", &[false, false, false, false, false, true]);
+        assert_schemas(
+            &requests,
+            "p00",
+            &[None, None, None, None, None, None, Some(&[Colour::Blue])],
+        );
     }
 
     #[tokio::test]
@@ -862,7 +955,12 @@ mod tests {
         };
         let server = fake(
             "p00",
-            vec![Script::FetchWiki, Script::ArgueReply, Script::VoteBlue],
+            vec![
+                Script::FetchWiki,
+                Script::StanceBlue,
+                Script::ArgueReply,
+                Script::VoteBlue,
+            ],
         );
         let (url, task) = serve(server.clone()).await;
         let reply_model = model(&url);
@@ -897,6 +995,7 @@ mod tests {
             vec![
                 Script::FetchWiki,
                 Script::ArgueUnknownReply,
+                Script::StanceBlue,
                 Script::ArgueLastEvidence,
                 Script::VoteBlue,
             ],
@@ -1002,6 +1101,19 @@ mod tests {
             .await
             .unwrap();
 
+        author
+            .write(
+                "stance-0",
+                Action::Stance {
+                    prefer: vec![Colour::Blue],
+                    accept: vec![],
+                    refuse: vec![],
+                    cites: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap();
         let source = FixedSource {
             calls: Arc::new(AtomicUsize::new(0)),
         };
@@ -1011,6 +1123,7 @@ mod tests {
                 peer,
                 vec![
                     Script::FetchWiki,
+                    Script::StanceBlue,
                     Script::ArgueLastEvidence,
                     Script::VoteBlue,
                 ],
@@ -1047,9 +1160,14 @@ mod tests {
                 &requests,
                 peer,
                 if peer == "p00" {
-                    &[false, false, true]
+                    &[None, None, None, Some(&[Colour::Blue])]
                 } else {
-                    &[true, true, true]
+                    &[
+                        Some(&[Colour::Blue]),
+                        Some(&[Colour::Blue]),
+                        Some(&[Colour::Blue]),
+                        Some(&[Colour::Blue]),
+                    ]
                 },
             );
         }
@@ -1090,6 +1208,7 @@ mod tests {
             vec![
                 Script::FetchBirths,
                 Script::FetchWiki,
+                Script::StanceBlue,
                 Script::ArgueLastEvidence,
                 Script::VoteBlue,
             ],
@@ -1134,6 +1253,7 @@ mod tests {
             "p00",
             vec![
                 Script::FetchObservances,
+                Script::StanceBlue,
                 Script::ArgueLastEvidence,
                 Script::VoteBlue,
             ],
@@ -1188,8 +1308,12 @@ mod tests {
             .iter()
             .filter(|(path, _)| path == "/completion")
             .collect();
-        assert_eq!(completions.len(), 3);
-        for ((_, body), may_vote) in completions.iter().zip([false, false, true]) {
+        assert_eq!(completions.len(), 4);
+        for ((_, body), may_vote) in
+            completions
+                .iter()
+                .zip([None, None, None, Some(&[Colour::Blue][..])])
+        {
             assert_eq!(
                 body["json_schema"],
                 prompt::schema_allowing(&day, "p00", may_vote)
@@ -1210,6 +1334,7 @@ mod tests {
             vec![
                 Script::FetchObservances,
                 Script::FetchWiki,
+                Script::StanceBlue,
                 Script::ArgueLastEvidence,
                 Script::VoteBlue,
             ],
@@ -1243,5 +1368,119 @@ mod tests {
         assert_eq!(book.index().evidence.len(), 1);
         let requests = server.requests.lock().unwrap().clone();
         assert_eq!(tool_results(&requests)[0], r#"{"error":"source_invalid"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_refused_vote_can_redeclare_a_stance_and_vote_with_the_new_grammar() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = open_book(dir.path(), "p00.redb", "p00").await;
+        let source = FixedSource {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchWiki,
+                Script::StanceRed,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+                Script::StanceBlue,
+                Script::VoteBlue,
+            ],
+        );
+        let (url, task) = serve(server.clone()).await;
+        assert_eq!(
+            activate(
+                &book,
+                &model(&url),
+                &source,
+                "p00",
+                day(),
+                clock(),
+                limits(8),
+                "redeclare",
+                &mut Vec::new()
+            )
+            .await
+            .unwrap(),
+            Colour::Blue
+        );
+        task.abort();
+        let requests = server.requests.lock().unwrap().clone();
+        let results = tool_results(&requests);
+        assert_eq!(
+            serde_json::from_str::<Value>(&results[3]).unwrap(),
+            json!({"refused":"VoteOutsideStance","reason":"vote a colour in your current prefer or accept lists, or declare a new stance first"})
+        );
+        assert_schemas(
+            &requests,
+            "p00",
+            &[
+                None,
+                None,
+                None,
+                Some(&[Colour::Red]),
+                Some(&[Colour::Red]),
+                Some(&[Colour::Blue]),
+            ],
+        );
+        assert_eq!(book.index().stances["p00"].prefer, [Colour::Blue]);
+        assert_eq!(book.ledger().page(None,32).await.unwrap().records.iter().filter(|r| matches!(r,crate::record::Record::Action(a) if matches!(a.action,Action::Stance { .. }))).count(),2);
+    }
+
+    #[tokio::test]
+    async fn missing_stance_and_uncited_refusal_continue_until_a_valid_stance_and_vote() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = open_book(dir.path(), "p00.redb", "p00").await;
+        let source = FixedSource {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let server = fake(
+            "p00",
+            vec![
+                Script::FetchWiki,
+                Script::ArgueLastEvidence,
+                Script::VoteBlue,
+                Script::StanceRefuseRedUncited,
+                Script::StanceRefuseRedCited,
+                Script::VoteBlue,
+            ],
+        );
+        let (url, task) = serve(server.clone()).await;
+        assert_eq!(
+            activate(
+                &book,
+                &model(&url),
+                &source,
+                "p00",
+                day(),
+                clock(),
+                limits(8),
+                "missing-stance",
+                &mut Vec::new()
+            )
+            .await
+            .unwrap(),
+            Colour::Blue
+        );
+        task.abort();
+        let requests = server.requests.lock().unwrap().clone();
+        let results = tool_results(&requests);
+        assert_eq!(
+            serde_json::from_str::<Value>(&results[2]).unwrap(),
+            json!({"refused":"VoteBeforeStance","reason":"declare a stance first; a vote needs one fetch, a stance and one argument in this run"})
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&results[3]).unwrap(),
+            json!({"refused":"StanceRefusalUncited","reason":"a refusal cites at least one evidence id you fetched this run; cite one or leave refuse empty"})
+        );
+        assert_schemas(
+            &requests,
+            "p00",
+            &[None, None, None, None, None, Some(&[Colour::Blue])],
+        );
+        let index = book.index();
+        assert_eq!(index.stances["p00"].cites.len(), 1);
+        assert_eq!(index.votes.len(), 1);
     }
 }
