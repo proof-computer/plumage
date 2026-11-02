@@ -561,6 +561,9 @@ fn cited_phrase(count: usize) -> String {
 }
 
 pub(super) fn source_label(evidence: &Evidence) -> String {
+    if Allowlist::is_observances(evidence.url()) {
+        return "UN · Observances".to_owned();
+    }
     let Some((edition, list)) = Allowlist::source(evidence.url()) else {
         return evidence.url().host_str().unwrap_or("source").to_owned();
     };
@@ -1453,14 +1456,17 @@ mod tests {
             .collect();
         records.push(sourced("ada", "https://example.com/fact", 0, "other"));
         records.push(sourced("ada", "data:text/plain,fact", 0, "hostless"));
+        records.push(sourced("ada", crate::observances::URL, 0, "UN fact"));
         let html = render_front(&page(&[], &[], &records, None, Paint::NoRecord));
         assert!(!html.contains("Wikipedia · "));
-        for (fact, label) in records.iter().zip(
-            cases
-                .iter()
-                .map(|(_, _, label)| *label)
-                .chain(["example.com", "source"]),
-        ) {
+        for (fact, label) in records
+            .iter()
+            .zip(cases.iter().map(|(_, _, label)| *label).chain([
+                "example.com",
+                "source",
+                "UN · Observances",
+            ]))
+        {
             let marker = format!("<article class=\"card fact\" id=\"fact-{}\"", fact.id().0);
             let article = html
                 .split_once(&marker)

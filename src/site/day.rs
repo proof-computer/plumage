@@ -1012,14 +1012,23 @@ mod tests {
             0,
             "hostless",
         ));
+        records.push(Evidence::new(
+            "ada".into(),
+            "run".into(),
+            Url::parse(crate::observances::URL).unwrap(),
+            0,
+            "UN fact",
+        ));
         let html = render_day(&page(&[], &[], &records, None, Paint::NoRecord));
         assert!(!html.contains("Wikipedia · "));
-        for (fact, label) in records.iter().zip(
-            cases
-                .iter()
-                .map(|(_, _, label)| *label)
-                .chain(["example.com", "source"]),
-        ) {
+        for (fact, label) in records
+            .iter()
+            .zip(cases.iter().map(|(_, _, label)| *label).chain([
+                "example.com",
+                "source",
+                "UN · Observances",
+            ]))
+        {
             let marker = format!("<article class=\"card fact\" id=\"fact-{}\"", fact.id().0);
             let article = html
                 .split_once(&marker)

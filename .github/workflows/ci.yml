@@ -23,8 +23,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
       - name: Check payload scripts
         run: |
-          python3 -m py_compile scripts/package-acurast.py scripts/test-package-acurast.py scripts/build-inference-server.py scripts/fill-v5-release.py
+          python3 -m py_compile scripts/package-acurast.py scripts/test-package-acurast.py scripts/build-inference-server.py scripts/fill-v5-release.py scripts/check-un-observances.py scripts/test-check-un-observances.py
           python3 scripts/test-package-acurast.py
+          python3 scripts/test-check-un-observances.py
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Clippy

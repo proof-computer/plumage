@@ -133,6 +133,10 @@ fn push_actions(out: &mut String) {
                 "One of four editions per peer, set by a hash of its id: {}",
                 EDITIONS.join(", ")
             ),
+            format!(
+                "<code>{}</code>: the day’s UN observances, from a calendar compiled into the peer; offered only on a day the list names, and never fetched live",
+                crate::observances::HOST
+            ),
             format!("{FETCHES_PER_ACTIVATION} fetches per activation"),
             "Each peer starts at a different entry of each list, set by a hash of its id"
                 .to_owned(),
@@ -350,6 +354,10 @@ mod tests {
             format!(
                 "One of four editions per peer, set by a hash of its id: {}",
                 EDITIONS.join(", ")
+            ),
+            format!(
+                "<code>{}</code>: the day’s UN observances, from a calendar compiled into the peer; offered only on a day the list names, and never fetched live",
+                crate::observances::HOST
             ),
             "3 fetches per activation".to_owned(),
             "Each peer starts at a different entry of each list, set by a hash of its id"

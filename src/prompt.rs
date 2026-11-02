@@ -74,7 +74,7 @@ pub fn context(
     })
 }
 
-/// [`crate::actions::schema`] with this peer's five source URLs as the only fetch
+/// [`crate::actions::schema`] with this peer's source URLs for the day as the only fetch
 /// `url` values. Nothing else changes.
 pub fn schema_for(day: &Day, peer_id: &str) -> Value {
     let mut schema = crate::actions::schema();
@@ -493,5 +493,44 @@ mod tests {
         english["oneOf"][0]["properties"]["url"] =
             expected["oneOf"][0]["properties"]["url"].clone();
         assert_eq!(english, expected);
+    }
+
+    #[test]
+    fn calendar_source_and_fetch_grammar_follow_the_day_together() {
+        for (date, count) in [("2026-02-02", 6), ("2026-10-26", 5)] {
+            let day: Day = date.parse().unwrap();
+            let clock = DayClock {
+                real_start_ms: u64::MAX,
+                sim_start_ms: day.open_ms(),
+                speed: 1,
+            };
+            let gate = VoteGate {
+                fetched: false,
+                argued: false,
+            };
+            let value = context(&day, &clock, "p00", &DayIndex::default(), 3, gate);
+            let schema = schema_for(&day, "p00");
+            let urls = schema["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|choice| choice["properties"]["action"]["const"] == "fetch")
+                .unwrap()
+                .pointer("/properties/url/enum")
+                .unwrap();
+            assert_eq!(value["sources"].as_array().unwrap().len(), count);
+            assert_eq!(&value["sources"], urls);
+            assert_eq!(
+                urls.as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|url| url == crate::observances::URL),
+                count == 6
+            );
+            if count == 6 {
+                assert_eq!(value["sources"][5], crate::observances::URL);
+            }
+            assert_eq!(value.as_object().unwrap().len(), 14);
+        }
     }
 }
