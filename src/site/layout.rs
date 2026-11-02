@@ -3,10 +3,13 @@
 //! `@font-face` uses the CSS descriptor `src:`. The site test forbids the HTML
 //! attribute `src=`, which this string does not contain.
 
+use crate::closing::{Decision, LIVE_RULE};
 use crate::colour::Colour;
 use crate::day::{Day, utc_time};
+use crate::tally::{STANCE_BANDS_RULE, StanceBands};
+use std::collections::BTreeMap;
 
-use super::{Chrome, Paint, Section};
+use super::{Chrome, DayPage, Paint, Section};
 
 const FACES: &[(&str, &str, &str)] = &[
     (
@@ -81,6 +84,25 @@ nav[aria-label=\"Days\"] { display: flex; flex-wrap: wrap; justify-content: spac
 .tile a { display: flex; flex-direction: column; text-decoration: none; line-height: 1.25; }
 .tile .name { font-weight: 700; font-size: 15px; }
 .tile .id { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; font-family: \"IBM Plex Mono\", ui-monospace, monospace; }
+.stances { display: flex; flex-direction: column; gap: 16px; }
+.stances h2, .stances p { margin: 0; }
+.stances > p.muted:not(.mono) { max-width: 46em; font-size: 15px; color: #4A4A4A; }
+.stance-scroll { overflow-x: auto; }
+.stance-rows { min-width: 330px; }
+.stance-rows th { font-family: inherit; font-size: 15px; font-weight: 600; padding: 0 12px 8px 0; border-bottom: 1px solid #E8E8E3; width: 26%; }
+.stance-rows th:first-child { width: 22%; }
+.stance { border-top: 1px solid #EDEDEA; }
+.stance th { padding: 7px 12px 7px 0; white-space: nowrap; border: 0; }
+.stance th .swatch-sm { width: 16px; height: 16px; vertical-align: middle; margin-right: 8px; }
+.stance .band { display: table-cell; height: auto; padding: 7px 12px 7px 0; border: 0; border-radius: 0; box-shadow: none; overflow: visible; vertical-align: middle; }
+.stance .band:last-child { padding-right: 0; }
+.stances > .mono { font-size: 12px; }
+.stance-value { display: flex; align-items: center; gap: 8px; }
+.stance-track { height: 12px; border-radius: 6px; background: #F1F1EE; display: flex; overflow: hidden; }
+.stance .stance-fill { flex: none; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.22); }
+.stance .stance-fill.refused { box-shadow: none; }
+.stance .stance-count { flex: none; width: 22px; text-align: right; font-family: \"IBM Plex Mono\", ui-monospace, monospace; font-size: 13px; }
+.stance-count.zero { color: #6B6B6B; }
 .numbers { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
 .numbers .card { flex: 1 1 190px; margin: 0; border-radius: 20px; padding: 18px 20px; display: flex; flex-direction: column; gap: 4px; }
 .numbers .n { font-size: 40px; font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; }
@@ -213,6 +235,126 @@ pub(crate) fn push_escaped(out: &mut String, text: &str) {
             other => out.push(other),
         }
     }
+}
+
+/// Shared copy at the same moment and over the same voters as the page's votes.
+pub(super) fn stance_copy(
+    page: &DayPage<'_>,
+    moment: u64,
+    live: &[String],
+    decision: Option<Decision>,
+) -> (String, String) {
+    let time = &utc_time(moment)[..5];
+    let voters = if live.len() == 1 {
+        "live voter"
+    } else {
+        "live voters"
+    };
+    match decision {
+        Some(Decision::Decided { colour, .. }) => (
+            format!("Stances at the decision · {time} UTC"),
+            format!(
+                "Each live voter’s newest stance at {time} UTC, the moment {} was decided, counted per colour over the {} {voters}.",
+                colour.name(),
+                live.len()
+            ),
+        ),
+        Some(Decision::Undecided) => (
+            format!("Stances at close · {time} UTC"),
+            format!(
+                "Each live voter’s newest stance at {time} UTC, when the day closed undecided, counted per colour over the {} {voters}.",
+                live.len()
+            ),
+        ),
+        None => {
+            let lead = if page.stances.is_empty() {
+                "No peer has declared a stance yet today. A peer declares one before its first vote, so the counts fill in as peers vote.".to_owned()
+            } else if !page
+                .stances
+                .iter()
+                .any(|stance| live.contains(&stance.author))
+            {
+                let peers = if page.stances.len() == 1 {
+                    "peer has"
+                } else {
+                    "peers have"
+                };
+                format!(
+                    "{} {peers} declared a stance, but none of them is a live voter at {time} UTC, so every count is 0.",
+                    page.stances.len()
+                )
+            } else {
+                format!(
+                    "What each live voter’s newest stance prefers, accepts and refuses, counted per colour at {time} UTC over the {} {voters}. A peer’s vote must name a colour its stance prefers or accepts.",
+                    live.len()
+                )
+            };
+            ("Stances".to_owned(), lead)
+        }
+    }
+}
+
+/// Draw the published counts, in vocabulary order, without deriving a verdict.
+pub(super) fn push_stances(
+    out: &mut String,
+    heading: &str,
+    lead: &str,
+    bands: &BTreeMap<Colour, StanceBands>,
+    live: usize,
+) {
+    out.push_str(
+        "<section class=\"card stances\" aria-labelledby=\"stances-h\"><h2 id=\"stances-h\">",
+    );
+    push_escaped(out, heading);
+    out.push_str("</h2><p class=\"muted\">");
+    push_escaped(out, lead);
+    out.push_str("</p><div class=\"stance-scroll\"><table class=\"stance-rows\" aria-labelledby=\"stances-h\"><thead><tr>");
+    for label in ["colour", "preferred", "accepted", "refused"] {
+        out.push_str(&format!("<th scope=\"col\">{label}</th>"));
+    }
+    out.push_str("</tr></thead><tbody>");
+    for colour in Colour::ALL {
+        let band = &bands[&colour];
+        let [r, g, b] = colour.srgb();
+        let hex = format!("#{r:02X}{g:02X}{b:02X}");
+        out.push_str(&format!("<tr class=\"stance\" data-colour=\"{}\"><th scope=\"row\"><span class=\"swatch-sm\" aria-hidden=\"true\" style=\"background:{hex}\"></span>{}</th>", colour.name(), colour.name()));
+        for (label, count, fill) in [
+            ("preferred", band.preferred, hex.clone()),
+            (
+                "accepted",
+                band.accepted,
+                format!("repeating-linear-gradient(135deg,{hex} 0 4px,#FFFFFF 4px 7px)"),
+            ),
+            ("refused", band.refused, "#3A3A3A".to_owned()),
+        ] {
+            out.push_str(&format!("<td class=\"band\" data-band=\"{label}\" data-count=\"{count}\" data-of=\"{live}\"><span class=\"stance-value\"><span class=\"stance-track\" aria-hidden=\"true\">"));
+            if live > 0 && count > 0 {
+                let width = count as f64 / live as f64 * 100.0;
+                out.push_str(&format!("<span class=\"stance-fill {label}\" style=\"width:{width:.4}%;background:{fill}\"></span>"));
+            }
+            let zero = if count == 0 { " zero" } else { "" };
+            out.push_str(&format!(
+                "</span><span class=\"stance-count{zero}\">{count}</span></span></td>"
+            ));
+        }
+        out.push_str("</tr>");
+    }
+    out.push_str("</tbody></table></div>");
+    if live > 0 {
+        let voters = if live == 1 {
+            "live voter"
+        } else {
+            "live voters"
+        };
+        out.push_str(&format!("<p class=\"mono muted\">Each bar is out of {live} {voters}. Colours are listed in the vocabulary’s order.</p>"));
+    }
+    out.push_str("<details><summary>How these are counted</summary>");
+    for rule in [STANCE_BANDS_RULE, LIVE_RULE] {
+        out.push_str("<p class=\"mono\">");
+        push_escaped(out, rule);
+        out.push_str("</p>");
+    }
+    out.push_str("</details></section>\n");
 }
 
 fn push_header(out: &mut String, prefix: &str, section: Option<Section>, paint: Paint) {
@@ -389,6 +531,25 @@ mod tests {
             ".tile a",
             ".tile .name",
             ".tile .id",
+            ".stances",
+            ".stances h2, .stances p",
+            ".stances > p.muted:not(.mono)",
+            ".stance-scroll",
+            ".stance-rows",
+            ".stance-rows th",
+            ".stance-rows th:first-child",
+            ".stance",
+            ".stance th",
+            ".stance th .swatch-sm",
+            ".stance .band",
+            ".stance .band:last-child",
+            ".stances > .mono",
+            ".stance-value",
+            ".stance-track",
+            ".stance .stance-fill",
+            ".stance .stance-fill.refused",
+            ".stance .stance-count",
+            ".stance-count.zero",
             ".numbers",
             ".numbers .card",
             ".numbers .n",
@@ -451,6 +612,39 @@ mod tests {
         assert!(phone.contains(".hero { padding: 40px 0 32px; }"));
         assert!(!style.contains("td, th { border: 1px solid"));
         assert_clean(&html);
+    }
+
+    #[test]
+    fn stance_bars_keep_the_agreed_fills_and_escape_their_copy() {
+        use crate::site::support::{ESCAPED, RAW, assert_stance_rows};
+        use crate::tally::StanceBands;
+        let bands = Colour::ALL
+            .into_iter()
+            .map(|colour| {
+                let counts = if colour == Colour::White {
+                    StanceBands {
+                        preferred: 1,
+                        accepted: 2,
+                        refused: 1,
+                    }
+                } else {
+                    StanceBands::default()
+                };
+                (colour, counts)
+            })
+            .collect();
+        let mut html = String::new();
+        super::push_stances(&mut html, RAW, RAW, &bands, 2);
+        assert_eq!(html.matches(ESCAPED).count(), 2);
+        assert_stance_rows(&html, 2, &[(Colour::White, [1, 2, 1])]);
+        assert!(html.contains("stance-fill preferred\" style=\"width:50.0000%;background:#FFFFFF"));
+        assert!(html.contains("stance-fill accepted\" style=\"width:100.0000%;background:repeating-linear-gradient(135deg,#FFFFFF 0 4px,#FFFFFF 4px 7px)"));
+        assert!(html.contains("stance-fill refused\" style=\"width:50.0000%;background:#3A3A3A"));
+        assert!(super::STYLESHEET.contains(".stance .stance-fill { flex: none; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.22); }"));
+        assert!(super::STYLESHEET.contains(".stance .stance-fill.refused { box-shadow: none; }"));
+        assert!(super::STYLESHEET.contains(".stance-count.zero { color: #6B6B6B; }"));
+        assert!(super::STYLESHEET.contains(".stance-scroll { overflow-x: auto; }"));
+        assert!(super::STYLESHEET.contains(".stance-rows { min-width: 330px; }"));
     }
 
     #[test]

@@ -10,11 +10,11 @@ use crate::day::{Day, utc_time};
 use crate::evidence::{Allowlist, Evidence};
 use crate::tally::{
     ARGUE_LABEL_RULE, ARGUMENTS_RULE, CITATIONS_RULE, COUNTS_RULE, CURRENT_VOTES_RULE,
-    FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations, counts, live_votes, trails,
-    vote_after, vote_changes, votes_cast,
+    FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE, citations, counts, live_votes, stance_bands,
+    trails, vote_after, vote_changes, votes_cast,
 };
 
-use super::layout::{chip, document, formula, peer, push_escaped};
+use super::layout::{chip, document, formula, peer, push_escaped, push_stances, stance_copy};
 use super::{DayPage, Paint, Section};
 
 pub const DECIDED_VOTES_RULE: &str = "Once the day is decided, the votes shown are the live voters' current votes at the moment of decision, the end of the hour that decided it. Votes after that moment are not shown here; the day page lists every record.";
@@ -42,6 +42,14 @@ pub fn render_front(page: &DayPage<'_>) -> String {
     push_right_now(&mut body, page, &live, now, open, decision);
     body.push_str("</section>\n");
     push_current(&mut body, page, moment, decided_at);
+    let (heading, lead) = stance_copy(page, moment, &live, decided_at.map(|_| decision));
+    push_stances(
+        &mut body,
+        &heading,
+        &lead,
+        &stance_bands(page.stances, page.votes, open, moment),
+        live.len(),
+    );
     push_numbers(&mut body, page, live.len(), now, open, moment);
     push_activity(&mut body, page, now, open);
     let title = format!("Today {}", page.day);
@@ -762,6 +770,7 @@ mod tests {
             previous: None,
             next: None,
             votes,
+            stances: &[],
             arguments,
             evidence,
             decision: None,
@@ -1544,5 +1553,86 @@ mod tests {
         assert!(broad.contains("Wikipedia (en) · Births"));
         assert!(broad.contains("not cited"));
         assert_clean(&broad);
+    }
+
+    #[test]
+    fn stance_bands_share_the_live_vote_moment_and_keep_all_colours() {
+        use crate::colour::Colour::{Navy, Sky, Teal};
+        use crate::site::support::{assert_stance_rows, stance_fixture, stance_panel};
+        let (votes, stances) = stance_fixture();
+        let mut shown = page(&votes, &[], &[], None, Paint::Undecided);
+        shown.stances = &stances;
+        shown.chrome.as_of_ms = at(14, 30);
+        let html = render_front(&shown);
+        let panel = stance_panel(&html);
+        assert!(panel.contains("<h2 id=\"stances-h\">Stances</h2>"));
+        assert!(panel.contains("What each live voter’s newest stance prefers, accepts and refuses, counted per colour at 14:30 UTC over the 3 live voters. A peer’s vote must name a colour its stance prefers or accepts."));
+        assert!(panel.contains("Each bar is out of 3 live voters."));
+        assert_stance_rows(
+            &html,
+            3,
+            &[
+                (Green, [2, 2, 1]),
+                (Blue, [1, 2, 0]),
+                (Teal, [1, 2, 0]),
+                (Navy, [1, 1, 0]),
+                (Sky, [0, 1, 0]),
+                (Red, [0, 0, 1]),
+            ],
+        );
+        assert!(
+            html.find("id=\"votes-h\"").unwrap() < html.find("class=\"card stances\"").unwrap()
+        );
+        assert!(
+            html.find("class=\"card stances\"").unwrap() < html.find("class=\"numbers\"").unwrap()
+        );
+    }
+
+    #[test]
+    fn stance_bands_freeze_at_the_decision_with_the_votes() {
+        use crate::site::support::{assert_stance_rows, stance, stance_panel};
+        let mut votes = vec![];
+        let mut stances = vec![];
+        for author in ["a", "b", "c"] {
+            votes.extend([
+                vote(author, Blue, at(14, 0)),
+                vote(author, Blue, at(14, 40)),
+            ]);
+            stances.push(stance(author, at(13, 50), &[Blue], &[], &[]));
+        }
+        votes.push(vote("d", Red, at(15, 30)));
+        stances.push(stance("d", at(15, 20), &[Red], &[], &[Blue]));
+        let mut shown = page(&votes, &[], &[], None, Paint::Undecided);
+        shown.stances = &stances;
+        shown.chrome.as_of_ms = at(16, 0);
+        let html = render_front(&shown);
+        let panel = stance_panel(&html);
+        assert!(panel.contains("Stances at the decision · 15:00 UTC"));
+        assert!(panel.contains("Each live voter’s newest stance at 15:00 UTC, the moment blue was decided, counted per colour over the 3 live voters."));
+        assert_stance_rows(&html, 3, &[(Blue, [3, 3, 0])]);
+    }
+
+    #[test]
+    fn stance_empty_states_draw_zero_rows_and_name_the_read_time() {
+        use crate::site::support::{assert_stance_rows, stance_fixture, stance_panel};
+        let (votes, mut stances) = stance_fixture();
+        let mut shown = page(&votes, &[], &[], None, Paint::Undecided);
+        shown.chrome.as_of_ms = at(14, 30);
+        let html = render_front(&shown);
+        assert!(stance_panel(&html).contains("No peer has declared a stance yet today. A peer declares one before its first vote, so the counts fill in as peers vote."));
+        assert_stance_rows(&html, 3, &[]);
+        stances.pop();
+        shown.stances = &stances;
+        shown.chrome.as_of_ms = at(11, 30);
+        let html = render_front(&shown);
+        assert!(stance_panel(&html).contains("3 peers have declared a stance, but none of them is a live voter at 11:30 UTC, so every count is 0."));
+        assert!(stance_panel(&html).contains("Each bar is out of 1 live voter."));
+        assert_stance_rows(&html, 1, &[]);
+        shown.chrome.as_of_ms = at(10, 0);
+        let html = render_front(&shown);
+        assert!(!stance_panel(&html).contains("Each bar is out of"));
+        assert_stance_rows(&html, 0, &[]);
+        shown.stances = &stances[..1];
+        assert!(stance_panel(&render_front(&shown)).contains("1 peer has declared a stance"));
     }
 }

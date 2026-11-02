@@ -560,6 +560,7 @@ mod tests {
             previous: None,
             next: None,
             votes: &votes,
+            stances: &[],
             arguments: &arguments,
             evidence: &evidence,
             decision: None,

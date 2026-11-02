@@ -649,6 +649,7 @@ async fn write_live(config: &PeerConfig, book: &Book, day: Day) -> Result<()> {
         previous,
         next,
         votes: &frame.votes,
+        stances: &frame.stances,
         arguments: &frame.arguments,
         evidence: &frame.evidence,
         decision: None,
@@ -735,6 +736,7 @@ async fn write_closed_day(config: &PeerConfig, book: &Book, day: Day) -> Result<
             previous,
             next,
             votes: &frame.votes,
+            stances: &frame.stances,
             arguments: &frame.arguments,
             evidence: &frame.evidence,
             decision: Some(decision),
@@ -780,6 +782,7 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunSt
         previous: None,
         next: None,
         votes: &[],
+        stances: &[],
         arguments: &[],
         evidence: &[],
         decision: None,
@@ -815,6 +818,7 @@ async fn publish_close(config: &PeerConfig, book: &Book, day: Day, state: &RunSt
 
 struct Frame {
     votes: Vec<Vote>,
+    stances: Vec<tally::Stance>,
     arguments: Vec<ArgumentView>,
     evidence: Vec<Evidence>,
 }
@@ -827,6 +831,14 @@ fn frame_from(index: &DayIndex, clock: &DayClock) -> Frame {
             author: vote.author.clone(),
             colour: vote.colour,
             at_ms: clock.sim(vote.at_ms),
+        })
+        .collect();
+    let stances = index
+        .stances
+        .values()
+        .map(|stance| tally::Stance {
+            at_ms: clock.sim(stance.at_ms),
+            ..stance.clone()
         })
         .collect();
     let arguments = index
@@ -847,6 +859,7 @@ fn frame_from(index: &DayIndex, clock: &DayClock) -> Frame {
         .collect();
     Frame {
         votes,
+        stances,
         arguments,
         evidence,
     }
@@ -1308,6 +1321,41 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[test]
+    fn page_frame_carries_stance_records_on_the_simulated_clock() {
+        let clock = DayClock {
+            real_start_ms: 1_000,
+            sim_start_ms: 50_000,
+            speed: 10,
+        };
+        let stance = tally::Stance {
+            id: "s1".into(),
+            author: "a".into(),
+            at_ms: 1_250,
+            prefer: vec![Colour::Blue],
+            accept: vec![Colour::Sky],
+            refuse: vec![Colour::Red],
+            cites: vec![],
+        };
+        let mut index = DayIndex::default();
+        index.stances.insert(stance.author.clone(), stance.clone());
+        index.votes.push(Vote {
+            author: "a".into(),
+            colour: Colour::Blue,
+            at_ms: 1_250,
+        });
+        let frame = frame_from(&index, &clock);
+        assert_eq!(
+            frame.stances,
+            vec![tally::Stance {
+                at_ms: 52_500,
+                ..stance.clone()
+            }]
+        );
+        assert_eq!(frame.stances[0].at_ms, frame.votes[0].at_ms);
+        assert_eq!(index.stances["a"], stance);
+    }
 
     #[test]
     fn a_decision_stays_latched_when_late_votes_change_the_rule_result() {

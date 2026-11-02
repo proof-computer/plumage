@@ -8,10 +8,10 @@ use crate::day::Day;
 use crate::evidence::Evidence;
 use crate::tally::{
     ARGUE_LABEL_RULE, ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE, VOTES_CAST_RULE,
-    citations, counts, curve, fetches, trails, vote_after, vote_changes, votes_cast,
+    citations, counts, curve, fetches, stance_bands, trails, vote_after, vote_changes, votes_cast,
 };
 
-use super::layout::{chip, document, peer, push_escaped};
+use super::layout::{chip, document, peer, push_escaped, push_stances, stance_copy};
 use super::{DayPage, Paint, Section};
 
 const NOT_YET: &str = "repeating-linear-gradient(45deg,#F3F2EE 0 6px,#FFFFFF 6px 12px)";
@@ -41,6 +41,15 @@ pub fn render_day(page: &DayPage<'_>) -> String {
     body.push_str("</p>\n</section></section>\n");
     push_curve(&mut body, page);
     push_numbers(&mut body, page, live.len());
+    let moment = as_of(page);
+    let (heading, lead) = stance_copy(page, moment, &live, page.decision);
+    push_stances(
+        &mut body,
+        &heading,
+        &lead,
+        &stance_bands(page.stances, page.votes, page.day.open_ms(), moment),
+        live.len(),
+    );
     push_thread(&mut body, page);
     push_facts(&mut body, page);
     document(
@@ -822,6 +831,7 @@ mod tests {
             previous: Some((day.previous(), Paint::Undecided)),
             next: Some((today, Paint::NoRecord)),
             votes: &votes,
+            stances: &[],
             arguments: &[],
             evidence: &[],
             decision: Some(Decision::Decided {
@@ -1124,6 +1134,7 @@ mod tests {
             previous: None,
             next: None,
             votes: &votes,
+            stances: &[],
             arguments: &arguments,
             evidence: &[],
             decision: Some(Decision::Decided {
@@ -1239,6 +1250,7 @@ mod tests {
             previous: None,
             next: None,
             votes: &[],
+            stances: &[],
             arguments: &arguments,
             evidence: &records,
             decision: None,
@@ -1302,7 +1314,7 @@ mod tests {
         let start = html
             .find(&marker)
             .unwrap_or_else(|| panic!("missing {hour}"));
-        let rest = &html[start..];
+        let rest = html[start..].split_once("</section>").unwrap().0;
         let end = rest[marker.len()..]
             .find("data-hour=")
             .map(|at| at + marker.len())
@@ -1318,5 +1330,91 @@ mod tests {
         for word in crate::site::support::FORBIDDEN {
             assert!(!lower.contains(word), "{word}");
         }
+    }
+
+    #[test]
+    fn open_day_stance_bands_match_today_and_follow_the_numbers() {
+        use crate::colour::Colour::{Green, Navy, Sky, Teal};
+        use crate::site::support::{assert_stance_rows, stance_fixture, stance_panel};
+        let (votes, stances) = stance_fixture();
+        let mut shown = page(&votes, &[], &[], None, Paint::Undecided);
+        shown.stances = &stances;
+        shown.chrome.as_of_ms = 14 * HOLD_MS + HOLD_MS / 2;
+        let html = render_day(&shown);
+        assert_stance_rows(
+            &html,
+            3,
+            &[
+                (Green, [2, 2, 1]),
+                (Blue, [1, 2, 0]),
+                (Teal, [1, 2, 0]),
+                (Navy, [1, 1, 0]),
+                (Sky, [0, 1, 0]),
+                (Red, [0, 0, 1]),
+            ],
+        );
+        assert_eq!(
+            stance_panel(&html),
+            stance_panel(&crate::site::render_front(&shown))
+        );
+        let start = html.find("class=\"card stances\"").unwrap();
+        assert!(html.find("class=\"numbers\"").unwrap() < start);
+        assert!(start < html.find("id=\"thread-h\"").unwrap());
+    }
+
+    #[test]
+    fn decided_day_bands_read_at_the_decision_and_expire_old_voters() {
+        use crate::site::support::{assert_stance_rows, stance, stance_panel};
+        let from = 17 * HOLD_MS + 10 * 60_000;
+        let mut votes = vec![];
+        let mut stances = vec![];
+        for i in 0..12 {
+            let author = format!("p{i:02}");
+            if i < 5 {
+                votes.push(vote(&author, Red, 16 * HOLD_MS + 40 * 60_000));
+                stances.push(stance(&author, from - HOLD_MS, &[Red], &[], &[Blue]));
+            } else {
+                votes.push(vote(&author, Blue, from));
+                stances.push(stance(&author, from, &[Blue], &[], &[]));
+            }
+        }
+        let decision = Some(Decision::Decided {
+            colour: Blue,
+            held_from_ms: from,
+            held_to_ms: from + HOLD_MS,
+        });
+        // At exactly one hour, even the blue votes have expired.
+        let mut shown = page(&votes, &[], &[], decision, Paint::Decided(Blue));
+        shown.stances = &stances;
+        assert_stance_rows(&render_day(&shown), 0, &[]);
+        // Heartbeats keep seven voters live through the decided hour.
+        for i in 5..12 {
+            votes.push(vote(&format!("p{i:02}"), Blue, 17 * HOLD_MS + 50 * 60_000));
+        }
+        let mut shown = page(&votes, &[], &[], decision, Paint::Decided(Blue));
+        shown.stances = &stances;
+        shown.chrome.as_of_ms = 22 * HOLD_MS;
+        let html = render_day(&shown);
+        assert!(stance_panel(&html).contains("Stances at the decision · 18:10 UTC"));
+        assert!(stance_panel(&html).contains("Each live voter’s newest stance at 18:10 UTC, the moment blue was decided, counted per colour over the 7 live voters."));
+        assert_stance_rows(&html, 7, &[(Blue, [7, 7, 0])]);
+    }
+
+    #[test]
+    fn day_bands_keep_zero_rows_and_read_undecided_days_at_close() {
+        use crate::site::support::{assert_stance_rows, stance, stance_panel};
+        let mut shown = page(&[], &[], &[], None, Paint::Undecided);
+        let html = render_day(&shown);
+        assert!(stance_panel(&html).contains("No peer has declared a stance yet today."));
+        assert_stance_rows(&html, 0, &[]);
+        let votes = [vote("a", Blue, 22 * HOLD_MS + HOLD_MS / 2)];
+        let stances = [stance("a", 22 * HOLD_MS, &[Blue], &[], &[])];
+        shown.votes = &votes;
+        shown.stances = &stances;
+        shown.decision = Some(Decision::Undecided);
+        let html = render_day(&shown);
+        assert!(stance_panel(&html).contains("Stances at close · 23:00 UTC"));
+        assert!(stance_panel(&html).contains("Each live voter’s newest stance at 23:00 UTC, when the day closed undecided, counted per colour over the 1 live voter."));
+        assert_stance_rows(&html, 1, &[(Blue, [1, 1, 0])]);
     }
 }
