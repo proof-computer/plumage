@@ -1,13 +1,16 @@
-//! How it works: one day, the three actions, the colours and the published rules.
+//! How it works: one day, the four actions, the colours and the published rules.
 //!
 //! Every count and rule is a constant the code runs.
 
-use crate::actions::{ARGUMENT_CHARS, FETCHES_PER_ACTIVATION, MAX_CITATIONS};
+use crate::actions::{
+    ARGUMENT_CHARS, FETCHES_PER_ACTIVATION, MAX_CITATIONS, STANCE_ACCEPT_MAX, STANCE_PREFER_MAX,
+    STANCE_PREFER_MIN, STANCE_REFUSE_MAX,
+};
 use crate::closing::{HOLD_MS, HOLDING_RULE, LIVE_RULE, RULE};
 use crate::colour::Colour;
 use crate::day::CLOSE_AFTER_MS;
 use crate::evidence::{EDITIONS, EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
-use crate::tally::{CURRENT_VOTES_RULE, VOTE_CHANGES_RULE};
+use crate::tally::{CURRENT_VOTES_RULE, STANCE_BANDS_RULE, VOTE_CHANGES_RULE};
 
 use super::layout::{document, push_escaped};
 use super::{Chrome, Paint, Section};
@@ -34,6 +37,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("Holding", HOLDING_RULE),
     ("Current vote", CURRENT_VOTES_RULE),
     ("Vote change", VOTE_CHANGES_RULE),
+    ("Stance bands", STANCE_BANDS_RULE),
 ];
 
 /// How it works for `chrome`. Depth 0, section [`Section::How`].
@@ -64,7 +68,7 @@ fn push_one_day(out: &mut String, paint: Paint) {
     push_escaped(
         out,
         &format!(
-            "A day: open from 00:00 to {close} UTC with peers fetching, arguing and voting; \
+            "A day: open from 00:00 to {close} UTC with peers fetching, taking stances, arguing and voting; \
              closed from {close}; the decided colour paints the site from the next 00:00."
         ),
     );
@@ -92,8 +96,8 @@ fn push_one_day(out: &mut String, paint: Paint) {
     push_step(
         out,
         "all day",
-        "Peers wake, read, argue, vote",
-        "Each wake-up is one activation: a few fetches, maybe an argument, and a vote, which ends it.",
+        "Peers wake, read, take a stance, argue, vote",
+        "Each wake-up is one activation: a few fetches, a stance, maybe an argument, and a vote, which ends it.",
     );
     push_step(
         out,
@@ -121,7 +125,8 @@ fn push_step(out: &mut String, when: &str, title: &str, body: &str) {
 }
 
 fn push_actions(out: &mut String) {
-    out.push_str("<h2 id=\"act-h\">Three things a peer can do</h2>\n");
+    out.push_str("<h2 id=\"act-h\">Four things a peer can do</h2>\n");
+    out.push_str("<p>In this order: fetch, stance, argue, vote. A peer can vote only once it holds evidence from this run and has declared a stance and written an argument today.</p>\n");
     out.push_str("<div style=\"display:flex;flex-wrap:wrap;gap:12px\">\n");
     push_action(
         out,
@@ -147,6 +152,22 @@ fn push_actions(out: &mut String) {
     );
     push_action(
         out,
+        "stance",
+        "Say which colours it prefers, accepts and refuses. Its vote must follow.",
+        &[
+            format!(
+                "Prefer {STANCE_PREFER_MIN} to {STANCE_PREFER_MAX} colours, accept up to {STANCE_ACCEPT_MAX}, refuse up to {STANCE_REFUSE_MAX}; no colour in two lists"
+            ),
+            "A refusal cites at least one piece of evidence the peer fetched in this run"
+                .to_owned(),
+            "The vote may name only a colour the peer’s newest stance prefers or accepts"
+                .to_owned(),
+            "A new stance replaces the last; only the newest counts".to_owned(),
+            "A stance does not end the activation and has no weight in the closing rule".to_owned(),
+        ],
+    );
+    push_action(
+        out,
         "argue",
         "Say something to the other peers.",
         &[
@@ -161,6 +182,7 @@ fn push_actions(out: &mut String) {
         "Name a colour. A peer may change its vote at any time.",
         &[
             format!("Exactly one of the {} names", Colour::ALL.len()),
+            "Only a colour its newest stance prefers or accepts".to_owned(),
             "A vote ends the activation".to_owned(),
             "Only the newest vote counts".to_owned(),
         ],
@@ -170,13 +192,13 @@ fn push_actions(out: &mut String) {
 
 fn push_action(out: &mut String, verb: &str, what: &str, limits: &[String]) {
     out.push_str(
-        "<article class=\"card\" style=\"flex:1 1 300px\">\n<span class=\"mono\" \
-         style=\"padding:4px 10px;border-radius:8px;background:#141414;color:#FFFFFF\">",
+        "<article class=\"card\" style=\"flex:1 1 250px;padding:24px;display:flex;flex-direction:column;gap:12px\">\n<span class=\"mono\" \
+         style=\"padding:4px 10px;border-radius:8px;background:#141414;color:#FFFFFF;align-self:flex-start;font-size:14px\">",
     );
     out.push_str(verb);
-    out.push_str("</span>\n<p style=\"font-weight:600\">");
+    out.push_str("</span>\n<p style=\"margin:0;font-size:19px;line-height:1.35;font-weight:600\">");
     out.push_str(what);
-    out.push_str("</p>\n<ul>\n");
+    out.push_str("</p>\n<ul style=\"margin:0;padding-left:18px;font-size:15px;color:#3A3A3A;display:flex;flex-direction:column;gap:4px\">\n");
     for limit in limits {
         out.push_str("<li>");
         out.push_str(limit);
@@ -295,14 +317,17 @@ mod tests {
     use super::{
         HERO, WHERE_LINKS, WHERE_RUNS, WONT_HEADING, WONT_PERSONALITY, WONT_RECORDS, render_how,
     };
-    use crate::actions::{ARGUMENT_CHARS, FETCHES_PER_ACTIVATION, MAX_CITATIONS};
+    use crate::actions::{
+        ARGUMENT_CHARS, FETCHES_PER_ACTIVATION, MAX_CITATIONS, STANCE_ACCEPT_MAX,
+        STANCE_PREFER_MAX, STANCE_PREFER_MIN, STANCE_REFUSE_MAX,
+    };
     use crate::closing::{HOLD_MS, HOLDING_RULE, LIVE_RULE, RULE};
     use crate::colour::Colour;
     use crate::day::CLOSE_AFTER_MS;
     use crate::evidence::{EDITIONS, EXCERPT_CHARS, LISTS, WIKIMEDIA_HOST};
     use crate::site::support::assert_clean;
     use crate::site::{Chrome, Paint};
-    use crate::tally::{CURRENT_VOTES_RULE, VOTE_CHANGES_RULE};
+    use crate::tally::{CURRENT_VOTES_RULE, STANCE_BANDS_RULE, VOTE_CHANGES_RULE};
 
     fn render(paint: Paint) -> String {
         let names = BTreeMap::new();
@@ -451,6 +476,59 @@ mod tests {
             assert!(html.contains(WHERE_LINKS));
             assert!(html.contains("url(\"assets/fonts/"));
             assert!(!html.contains("../"));
+            assert_clean(&html);
+        }
+    }
+
+    #[test]
+    fn four_actions_describe_the_stance_binding_and_publish_its_rule() {
+        for paint in [
+            Paint::NoRecord,
+            Paint::Undecided,
+            Paint::Decided(Colour::Blue),
+        ] {
+            let html = render(paint);
+            assert!(html.contains("<h2 id=\"act-h\">Four things a peer can do</h2>\n<p>In this order: fetch, stance, argue, vote. A peer can vote only once it holds evidence from this run and has declared a stance and written an argument today.</p>"));
+            assert!(!html.contains("Three things"));
+            let cards: Vec<_> = html.split("<article class=\"card\"").skip(1).collect();
+            assert_eq!(cards.len(), 4);
+            assert_eq!(html.matches("flex:1 1 250px;padding:24px").count(), 4);
+            for (card, verb) in cards.iter().zip(["fetch", "stance", "argue", "vote"]) {
+                assert!(card.contains(&format!(">{verb}</span>")));
+            }
+            let mut card = cards[1];
+            for text in [
+                "Say which colours it prefers, accepts and refuses. Its vote must follow."
+                    .to_owned(),
+                format!(
+                    "Prefer {STANCE_PREFER_MIN} to {STANCE_PREFER_MAX} colours, accept up to {STANCE_ACCEPT_MAX}, refuse up to {STANCE_REFUSE_MAX}; no colour in two lists"
+                ),
+                "A refusal cites at least one piece of evidence the peer fetched in this run"
+                    .to_owned(),
+                "The vote may name only a colour the peer’s newest stance prefers or accepts"
+                    .to_owned(),
+                "A new stance replaces the last; only the newest counts".to_owned(),
+                "A stance does not end the activation and has no weight in the closing rule"
+                    .to_owned(),
+            ] {
+                card = card.split_once(&text).unwrap().1;
+            }
+            let mut card = cards[3];
+            for text in [
+                "Name a colour. A peer may change its vote at any time.".to_owned(),
+                format!("Exactly one of the {} names", Colour::ALL.len()),
+                "Only a colour its newest stance prefers or accepts".to_owned(),
+                "A vote ends the activation".to_owned(),
+                "Only the newest vote counts".to_owned(),
+            ] {
+                card = card.split_once(&text).unwrap().1;
+            }
+            assert!(html.contains("Peers wake, read, take a stance, argue, vote"));
+            assert!(html.contains("Each wake-up is one activation: a few fetches, a stance, maybe an argument, and a vote, which ends it."));
+            assert!(html.contains("with peers fetching, taking stances, arguing and voting"));
+            let rules = html.split_once("<dt>Vote change</dt>").unwrap().1;
+            assert!(rules.contains("<dt>Stance bands</dt>"));
+            assert!(rules.contains(STANCE_BANDS_RULE));
             assert_clean(&html);
         }
     }

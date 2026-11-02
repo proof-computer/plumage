@@ -69,6 +69,7 @@ pub struct DayPage<'a> {
     /// Nearest later record, or the open day with `Paint::NoRecord`.
     pub next: Option<(Day, Paint)>,
     pub votes: &'a [Vote],
+    pub stances: &'a [crate::tally::Stance],
     pub arguments: &'a [ArgumentView],
     pub evidence: &'a [Evidence],
     pub decision: Option<Decision>,
@@ -157,6 +158,112 @@ mod support {
         }
     }
 
+    pub(crate) fn stance(
+        author: &str,
+        at_ms: u64,
+        prefer: &[Colour],
+        accept: &[Colour],
+        refuse: &[Colour],
+    ) -> crate::tally::Stance {
+        crate::tally::Stance {
+            id: format!("stance-{author}"),
+            author: author.to_owned(),
+            at_ms,
+            prefer: prefer.to_vec(),
+            accept: accept.to_vec(),
+            refuse: refuse.to_vec(),
+            cites: vec![],
+        }
+    }
+
+    pub(crate) fn stance_fixture() -> (Vec<Vote>, Vec<crate::tally::Stance>) {
+        use Colour::{Blue, Green, Navy, Red, Sky, Teal};
+        let hour = 3_600_000;
+        (
+            vec![
+                vote("a", Blue, 14 * hour),
+                vote("b", Blue, 14 * hour + 600_000),
+                vote("c", Green, 14 * hour + 1_200_000),
+                vote("d", Red, 11 * hour),
+                // Interrupt the early red hold, so Today is still open at 14:30.
+                vote("a", Green, 12 * hour - 60_000),
+            ],
+            vec![
+                stance("a", 13 * hour, &[Green], &[Teal, Blue], &[Red]),
+                stance("b", 13 * hour, &[Blue, Navy], &[], &[Green]),
+                stance("c", 13 * hour, &[Green, Teal], &[Sky], &[]),
+                stance("d", 10 * hour, &[Red], &[], &[Blue]),
+            ],
+        )
+    }
+
+    pub(crate) fn stance_panel(html: &str) -> &str {
+        let marker = "<section class=\"card stances\"";
+        assert_eq!(html.matches(marker).count(), 1);
+        let start = html.find(marker).unwrap();
+        let end = start + html[start..].find("</section>").unwrap();
+        &html[start..end]
+    }
+
+    /// Pin every row, including the zeros, against independently named counts.
+    pub(crate) fn assert_stance_rows(html: &str, live: usize, expected: &[(Colour, [usize; 3])]) {
+        let panel = stance_panel(html);
+        let rows: Vec<_> = panel.split("<tr class=\"stance\" ").skip(1).collect();
+        assert_eq!(rows.len(), Colour::ALL.len());
+        for (row, colour) in rows.iter().zip(Colour::ALL) {
+            let row = row.split_once("</tr>").unwrap().0;
+            assert!(row.starts_with(&format!("data-colour=\"{}\">", colour.name())));
+            assert_eq!(row.matches("<td class=\"band\"").count(), 3);
+            let counts = expected
+                .iter()
+                .find(|(c, _)| *c == colour)
+                .map_or([0; 3], |(_, n)| *n);
+            let mut remaining = row;
+            for (label, count) in ["preferred", "accepted", "refused"].into_iter().zip(counts) {
+                remaining = remaining
+                    .split_once(&format!(
+                        "data-band=\"{label}\" data-count=\"{count}\" data-of=\"{live}\""
+                    ))
+                    .unwrap()
+                    .1;
+                let cell = remaining.split_once("</td>").unwrap().0;
+                assert!(cell.contains(&format!(">{count}</span>")));
+                if live == 0 || count == 0 {
+                    assert!(!cell.contains("class=\"stance-fill"));
+                }
+            }
+        }
+        let disclosure = panel
+            .split_once("<details><summary>How these are counted</summary>")
+            .unwrap()
+            .1;
+        assert!(!disclosure.contains("<tr"));
+        for rule in [crate::tally::STANCE_BANDS_RULE, crate::closing::LIVE_RULE] {
+            let mut escaped = String::new();
+            super::layout::push_escaped(&mut escaped, rule);
+            assert!(disclosure.contains(&format!("<p class=\"mono\">{escaped}</p>")));
+        }
+        for word in FORBIDDEN.iter().chain(
+            [
+                concat!("com", "promise"),
+                concat!("inter", "section"),
+                concat!("recom", "mend"),
+                "settle",
+                "bloc",
+            ]
+            .iter(),
+        ) {
+            assert!(!panel.to_lowercase().contains(word));
+        }
+        let lower = html.to_ascii_lowercase();
+        for marker in ["<script", "<link", "src="] {
+            assert!(!lower.contains(marker));
+        }
+        for word in FORBIDDEN {
+            assert!(!lower.contains(word));
+        }
+    }
+
     pub(crate) fn evidence(excerpt: &str) -> Evidence {
         Evidence::new(
             "ada".to_owned(),
@@ -199,6 +306,7 @@ mod support {
             previous: None,
             next: None,
             votes,
+            stances: &[],
             arguments,
             evidence,
             decision,
