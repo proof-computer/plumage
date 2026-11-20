@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::closing::{Decision, HOLD_MS, LIVE_RULE, RULE, holds, live_voters};
+use crate::closing::{Decision, HOLD_MS, LIVE_RULE, RULE, decide, holds, live_voters};
 use crate::colour::Colour;
 use crate::day::Day;
 use crate::evidence::Evidence;
@@ -63,33 +63,44 @@ pub fn render_day(page: &DayPage<'_>) -> String {
 
 fn decision_copy(page: &DayPage<'_>, live: usize) -> (String, String, String) {
     let painted = prose_date(page.day.next());
-    match page.decision {
-        Some(Decision::Decided {
+    let open = page.decision.is_none();
+    let open_ms = page.day.open_ms();
+    let decision = page
+        .decision
+        .unwrap_or_else(|| decide(page.votes, open_ms, page.chrome.as_of_ms));
+    match decision {
+        Decision::Decided {
             colour,
             held_from_ms,
             held_to_ms,
-        }) => (
-            format!("{}.", capitalise(colour.name())),
-            format!(
-                "Decided: {}, held by more than half of the live voters from {} to {} UTC; {live} live voters at {}. It painted {painted}.",
-                colour.name(),
-                hhmm(held_from_ms),
-                hhmm(held_to_ms),
-                hhmm(held_to_ms)
-            ),
-            "The rule that decided it".to_owned(),
+        } => {
+            let (live, paint_verb) = if open {
+                (live_voters(page.votes, open_ms, held_to_ms).len(), "paints")
+            } else {
+                (live, "painted")
+            };
+            let end = hhmm(held_to_ms);
+            (
+                format!("{}.", capitalise(colour.name())),
+                format!(
+                    "Decided: {}, held by more than half of the live voters from {} to {end} UTC; {live} live voters at {end}. It {paint_verb} {painted}.",
+                    colour.name(),
+                    hhmm(held_from_ms),
+                ),
+                "The rule that decided it".to_owned(),
+            )
+        }
+        Decision::Undecided if open => (
+            "Open.".to_owned(),
+            "The question is open until 23:00 UTC.".to_owned(),
+            "The rule that will decide it".to_owned(),
         ),
-        Some(Decision::Undecided) => (
+        Decision::Undecided => (
             "Undecided.".to_owned(),
             format!(
                 "No colour held more than half of the live voters for a continuous hour before 23:00 UTC. {painted} was left unpainted."
             ),
             "The rule that decided it".to_owned(),
-        ),
-        None => (
-            "Open.".to_owned(),
-            "The question is open until 23:00 UTC.".to_owned(),
-            "The rule that will decide it".to_owned(),
         ),
     }
 }
@@ -681,12 +692,12 @@ mod tests {
     use url::Url;
 
     use super::render_day;
-    use crate::closing::{Decision, HOLD_MS, LIVE_RULE, RULE};
+    use crate::closing::{Decision, HOLD_MS, LIVE_RULE, RULE, decide};
     use crate::colour::Colour::{self, Blue, Red};
     use crate::day::Day;
     use crate::evidence::Evidence;
     use crate::site::support::{ESCAPED, RAW, assert_clean, body_open, page, vote};
-    use crate::site::{ArgumentView, Chrome, DayPage, Paint};
+    use crate::site::{ArgumentView, Chrome, DayPage, Paint, render_front};
     use crate::tally::{
         ARGUE_LABEL_RULE, ARGUMENTS_RULE, CURVE_RULE, FETCHES_RULE, VOTE_CHANGES_RULE,
         VOTES_CAST_RULE, curve,
@@ -760,6 +771,50 @@ mod tests {
         assert!(!html.contains("1970-01-02.html"));
         assert!(!html.contains("<nav aria-label=\"Days\">"));
         assert_clean(&html);
+    }
+
+    #[test]
+    fn an_open_day_shows_the_same_decision_as_today() {
+        let held_from_ms = 13 * HOLD_MS + 37 * 60_000;
+        let held_to_ms = held_from_ms + HOLD_MS;
+        let later_vote_ms = held_to_ms + 2 * 60_000;
+        let votes = [
+            vote("ada", Blue, held_from_ms),
+            vote("ada", Blue, held_from_ms + HOLD_MS / 2),
+            vote("bea", Red, later_vote_ms),
+        ];
+        let mut shown = page(&votes, &[], &[], None, Paint::NoRecord);
+        shown.chrome.as_of_ms = later_vote_ms;
+        assert_eq!(
+            decide(shown.votes, shown.day.open_ms(), shown.chrome.as_of_ms),
+            Decision::Decided {
+                colour: Blue,
+                held_from_ms,
+                held_to_ms,
+            }
+        );
+
+        let headline = "<h1 class=\"verdict\">Blue.</h1>";
+        let decision_copy = "Decided: blue, held by more than half of the live voters from 13:37 to 14:37 UTC; 1 live voters at 14:37. It paints Friday 2 January.";
+        let rule_heading = "<strong>The rule that decided it</strong>";
+        let open_copy = "The question is open until 23:00 UTC.";
+        let html = render_day(&shown);
+        assert!(html.contains(headline));
+        assert!(html.contains(decision_copy));
+        assert!(html.contains(rule_heading));
+        assert!(!html.contains(open_copy));
+        assert!(html.contains("<span class=\"n\">3</span><span class=\"label\">votes cast</span>"));
+        let today = render_front(&shown);
+        assert!(today.contains("Decided: <span"));
+        assert!(today.contains("<span class=\"big\">Blue</span>, held 13:37–14:37 UTC."));
+
+        shown.chrome.as_of_ms = held_to_ms - 1;
+        let html = render_day(&shown);
+        assert!(html.contains("<h1 class=\"verdict\">Open.</h1>"));
+        assert!(html.contains(open_copy));
+        assert!(!html.contains(headline));
+        assert!(!html.contains("Decided: blue"));
+        assert!(!html.contains(rule_heading));
     }
 
     #[test]
