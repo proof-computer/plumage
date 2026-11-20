@@ -8,8 +8,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use forthebirds_net::{StaticPeer, pinned_client};
-use forthebirds_store::LedgerConfig;
-use forthebirds_sync::{CATCH_UP_PAGES, ROUTE};
+use forthebirds_store::{LedgerConfig, LedgerRecord};
+use forthebirds_sync::{CATCH_UP_PAGES, ExchangeReply, ROUTE};
 use plumage::actions::Action;
 use plumage::book::Book;
 use plumage::clock::DayClock;
@@ -19,6 +19,7 @@ use plumage::day::Day;
 use plumage::fetch::FixtureSource;
 use plumage::peer;
 use plumage::peer::PeerSource;
+use plumage::record::Record;
 use plumage::site::ASSETS;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -273,7 +274,15 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     let run = tokio::spawn(async move { start(config, receiver).await });
     let site = root.path().join("p00-site");
     let archive_path = site.join("days/index.html");
-    until("archive on the first live write", || archive_path.is_file()).await;
+    let status_path = site.join("status.json");
+    until("archive after the first vote", || {
+        status_path.is_file()
+            && read_json(&status_path)["activations"]["voted"]
+                .as_u64()
+                .unwrap()
+                > 0
+    })
+    .await;
     assert!(!site.join(format!("days/{DAY}.json")).exists());
     let first_day = std::fs::read_to_string(site.join(format!("days/{DAY}.html"))).unwrap();
     assert!(!first_day.contains('←'));
@@ -288,7 +297,6 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     })
     .await;
     assert!(!site.join(format!("days/{DAY}.json")).exists());
-    let status_path = site.join("status.json");
     until("decided phase before close", || {
         read_json(&status_path)["phase"] == "decided"
     })
@@ -375,6 +383,213 @@ async fn one_peer_votes_blue_and_paints_the_next_days_front_page() {
     assert_eq!(status["day_open_ms"].as_u64().unwrap(), day().open_ms());
     let as_of = status["as_of_ms"].as_u64().unwrap();
     assert!(started <= as_of && as_of <= ended);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_peer_syncs_a_decided_day_without_activating() {
+    late_peer_first_exchange("decided").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_peer_activates_after_syncing_an_undecided_day() {
+    late_peer_first_exchange("voting").await;
+}
+
+async fn late_peer_first_exchange(leader_phase: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server, mut contexts) = support::spawn_recording().await;
+    let clock = clock_at(480);
+    let leader = peer_config(root.path(), "p00", &model, Vec::new(), clock);
+    let leader_status = leader.site_dir.join("status.json");
+    let leader_ad = leader.advertisement_file.clone();
+    let (stop_leader, leader_rx) = watch::channel(false);
+    let leader_run = tokio::spawn(start(leader, leader_rx));
+    until("leader reaches the requested phase and has a vote", || {
+        leader_status.is_file() && {
+            let status = read_json(&leader_status);
+            status["phase"] == leader_phase && status["activations"]["voted"].as_u64().unwrap() > 0
+        }
+    })
+    .await;
+
+    let target_ad = root.path().join("leader-visible-to-follower.ad");
+    let mut follower = peer_config(
+        root.path(),
+        "p01",
+        &model,
+        vec![StaticPeer {
+            name: "p00".to_owned(),
+            address: Ipv6Addr::LOCALHOST,
+            advertisement_file: target_ad.clone(),
+        }],
+        clock,
+    );
+    follower.activation_interval_ms = plumage::config::MAX_ACTIVATION_INTERVAL_MS;
+    let interval = follower.activation_interval_ms;
+    let follower_status = follower.site_dir.join("status.json");
+    let follower_live = follower.site_dir.join("index.html");
+    let follower_ad = follower.advertisement_file.clone();
+    let (stop_follower, follower_rx) = watch::channel(false);
+    let follower_run = tokio::spawn(start(follower, follower_rx));
+    until("follower serves its open day while waiting", || {
+        follower_live.is_file()
+    })
+    .await;
+    let status = read_json(&follower_status);
+    assert_eq!(status["phase"], "voting");
+    assert_eq!(status["activations"]["started"], 0);
+    let deadline = clock.sim(status["started_real_ms"].as_u64().unwrap()) + interval;
+    assert!(read_book(&follower_ad).await.is_empty());
+
+    let leader_records = read_book(&leader_ad).await;
+    assert!(first_vote_start(&leader_records, "p00").is_some());
+    // Publish the only target atomically, so a sync tick sees either no ad or a complete ad.
+    let pending_ad = root.path().join("leader-pending.ad");
+    std::fs::copy(&leader_ad, &pending_ad).unwrap();
+    std::fs::rename(&pending_ad, &target_ad).unwrap();
+
+    let decided = leader_phase == "decided";
+    until("follower observes the decision or votes", || {
+        let status = read_json(&follower_status);
+        if decided {
+            status["phase"] == "decided"
+        } else {
+            status["activations"]["voted"].as_u64().unwrap() > 0
+        }
+    })
+    .await;
+    let records = read_book(&follower_ad).await;
+    assert!(
+        leader_records
+            .iter()
+            .all(|known| records.iter().any(|record| record.id() == known.id()))
+    );
+    let status = read_json(&follower_status);
+    if decided {
+        assert_eq!(status["activations"]["started"], 0);
+        assert_eq!(status["authors_seen"], json!(["p00"]));
+        assert!(records.iter().all(|record| record.author() == "p00"));
+    } else {
+        assert!(first_vote_start(&records, "p01").expect("follower has voted") < deadline);
+    }
+
+    stop_follower.send(true).unwrap();
+    stop_leader.send(true).unwrap();
+    follower_run.await.unwrap().unwrap();
+    leader_run.await.unwrap().unwrap();
+    let follower_context =
+        std::iter::from_fn(|| contexts.try_recv().ok()).find(|context| context["you"] == "p01");
+    if decided {
+        assert!(follower_context.is_none());
+    } else {
+        let context = follower_context.expect("first inference context for the follower");
+        assert_eq!(
+            context["current_votes"],
+            json!([{"author": "p00", "colour": "blue"}])
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_peer_votes_after_one_interval_from_process_start() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let clock = clock_at(1);
+    let mut config = peer_config(root.path(), "p00", &model, Vec::new(), clock);
+    config.activation_interval_ms = 1_000;
+    let interval = config.activation_interval_ms;
+    let status_path = config.site_dir.join("status.json");
+    let ad = config.advertisement_file.clone();
+    let (stop, shutdown) = watch::channel(false);
+    let running = tokio::spawn(start(config, shutdown));
+
+    until("first lone vote", || {
+        status_path.is_file()
+            && read_json(&status_path)["activations"]["voted"]
+                .as_u64()
+                .unwrap()
+                > 0
+    })
+    .await;
+    let status = read_json(&status_path);
+    let deadline = clock.sim(status["started_real_ms"].as_u64().unwrap()) + interval;
+    let records = read_book(&ad).await;
+    let started = first_vote_start(&records, "p00").expect("lone peer has voted");
+    assert!(
+        started >= deadline,
+        "started at {started}, deadline {deadline}"
+    );
+    stop.send(true).unwrap();
+    running.await.unwrap().unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_peer_whose_first_activation_is_due_at_close_does_not_vote() {
+    let root = tempfile::tempdir().unwrap();
+    let (model, server) = support::spawn().await;
+    let interval = 1_800_000;
+    let clock = DayClock {
+        real_start_ms: wall_now() + 2_000,
+        sim_start_ms: day().close_ms() - interval,
+        speed: 1_000,
+    };
+    let mut config = peer_config(root.path(), "p00", &model, Vec::new(), clock);
+    config.activation_interval_ms = interval;
+    let status_path = config.site_dir.join("status.json");
+    let ad = config.advertisement_file.clone();
+    let (stop, shutdown) = watch::channel(false);
+    let running = tokio::spawn(start(config, shutdown));
+
+    until("day closes", || {
+        status_path.is_file() && read_json(&status_path)["phase"] == "sync_only"
+    })
+    .await;
+    let status = read_json(&status_path);
+    assert_eq!(
+        clock.sim(status["started_real_ms"].as_u64().unwrap()) + interval,
+        day().close_ms()
+    );
+    assert_eq!(status["activations"]["started"], 0);
+    assert!(read_book(&ad).await.is_empty());
+    stop.send(true).unwrap();
+    running.await.unwrap().unwrap();
+    server.abort();
+}
+
+async fn read_book(ad: &Path) -> Vec<Record> {
+    let mut records = Vec::new();
+    let mut since = 0;
+    let mut database = None;
+    loop {
+        let (status, reply) = post_exchange(ad, DAY, since, database.as_deref()).await;
+        assert_eq!(status, 200, "{reply}");
+        let page = serde_json::from_value::<ExchangeReply<Record>>(reply)
+            .unwrap()
+            .page;
+        records.extend(page.records);
+        if !page.has_more {
+            return records;
+        }
+        since = page.last_seq;
+        database = Some(page.database_id);
+    }
+}
+
+fn first_vote_start(records: &[Record], author: &str) -> Option<u64> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Action(record)
+                if record.author == author && matches!(record.action, Action::Vote { .. }) =>
+            {
+                let (activation, _) = record.operation_id.split_once('-').unwrap();
+                Some(activation.strip_prefix('a').unwrap().parse().unwrap())
+            }
+            _ => None,
+        })
+        .min()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -482,7 +697,12 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-async fn post_exchange(ad: &Path, run: &str) -> (u16, Value) {
+async fn post_exchange(
+    ad: &Path,
+    run: &str,
+    since: u64,
+    database_id: Option<&str>,
+) -> (u16, Value) {
     let advertisement = read_json(ad);
     let pin = advertisement["tlsFingerprint"].as_str().unwrap();
     let port = advertisement["port"].as_u64().unwrap();
@@ -496,10 +716,10 @@ async fn post_exchange(ad: &Path, run: &str) -> (u16, Value) {
             serde_json::to_vec(&json!({
                 "protocol": 1,
                 "run_id": run,
-                "peer_id": "p01",
+                "peer_id": "p99",
                 "records": [],
-                "since": 0,
-                "database_id": null
+                "since": since,
+                "database_id": database_id
             }))
             .unwrap(),
         )
@@ -660,10 +880,10 @@ async fn closed_days_older_than_seven_leave_the_sync_and_stay_on_disk() {
 
     let ad = root.path().join("p00.ad");
     until("the advertisement is published", || ad.is_file()).await;
-    let (gone, body) = post_exchange(&ad, &day().to_string()).await;
+    let (gone, body) = post_exchange(&ad, &day().to_string(), 0, None).await;
     assert_eq!(gone, 409, "{body}");
     assert_eq!(body["code"], "conflict");
-    let (kept, kept_body) = post_exchange(&ad, &held.to_string()).await;
+    let (kept, kept_body) = post_exchange(&ad, &held.to_string(), 0, None).await;
     assert_eq!(kept, 200, "{kept_body}");
     assert!(root.path().join(format!("p00/{DAY}.redb")).is_file());
     assert!(
