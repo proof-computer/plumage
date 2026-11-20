@@ -421,6 +421,13 @@ async fn run_days<S: Source>(
         };
         shared.insert(rewind(day, age), cache).await?;
     }
+    let started_real_ms = shared.state.lock().await.started_real_ms;
+    let mut first_activation_deadline = Some(
+        config
+            .clock
+            .sim(started_real_ms)
+            .saturating_add(config.activation_interval_ms),
+    );
     loop {
         if let Some(error) = shared.error.lock().await.take() {
             return Err(error);
@@ -434,7 +441,17 @@ async fn run_days<S: Source>(
             return Ok(());
         }
         *shared.open_day.lock().await = day;
-        let stop = run_day(config, model, source, day, shutdown, shared).await?;
+        // Only the startup day waits for sync. A process rolling over is already syncing.
+        let stop = run_day(
+            config,
+            model,
+            source,
+            day,
+            shutdown,
+            shared,
+            first_activation_deadline.take(),
+        )
+        .await?;
         if stop || config.last_day == Some(day) {
             return Ok(());
         }
@@ -455,6 +472,7 @@ async fn run_day<S: Source>(
     day: Day,
     shutdown: &mut watch::Receiver<bool>,
     shared: &Arc<Shared>,
+    mut first_activation_deadline: Option<u64>,
 ) -> Result<bool> {
     let book = shared.book(day).await?;
     let limits = Limits {
@@ -497,20 +515,40 @@ async fn run_day<S: Source>(
         if newly_decided {
             write_open(config, &book, day, shared).await?;
         }
-        let due = last_start.is_none_or(|started: u64| {
-            now.saturating_sub(started) >= config.activation_interval_ms
-        });
-        if !due {
-            let wake = last_start
-                .unwrap_or(now)
-                .saturating_add(config.activation_interval_ms)
-                .min(day.close_ms());
-            if wait_until(&config.clock, wake, shutdown, shared).await {
+        let wait = if let Some(deadline) = first_activation_deadline.take()
+            && !decided
+            && now < deadline
+        {
+            let replicator = shared
+                .runs
+                .get(&day.to_string())
+                .await
+                .ok_or_else(|| Error::new("storage", format!("day {day} has no replicator")))?;
+            if replicator.caught_up_ms().await.is_none() {
+                write_open(config, &book, day, shared).await?;
+            }
+            Some((deadline, Some(replicator)))
+        } else {
+            last_start
+                .filter(|started| now.saturating_sub(*started) < config.activation_interval_ms)
+                .map(|started| (started.saturating_add(config.activation_interval_ms), None))
+        };
+        if let Some((wake, first_sync)) = wait {
+            if wait_until(
+                &config.clock,
+                wake.min(day.close_ms()),
+                shutdown,
+                shared,
+                first_sync.as_ref(),
+            )
+            .await
+            {
                 if let Some(error) = shared.error.lock().await.take() {
                     return Err(error);
                 }
                 return Ok(true);
             }
+            // Recheck close and the book after waiting, including after the first sync.
             continue;
         }
         last_start = Some(now);
@@ -575,7 +613,7 @@ async fn run_day<S: Source>(
         }
         write_open(config, &book, day, shared).await?;
     }
-    if wait_until(&config.clock, day.next().open_ms(), shutdown, shared).await {
+    if wait_until(&config.clock, day.next().open_ms(), shutdown, shared, None).await {
         if let Some(error) = shared.error.lock().await.take() {
             return Err(error);
         }
@@ -1285,17 +1323,23 @@ async fn wait_until(
     sim_ms: u64,
     shutdown: &mut watch::Receiver<bool>,
     shared: &Shared,
+    first_sync: Option<&DayReplicator>,
 ) -> bool {
+    let wake = clock.real(sim_ms);
+    // A tick can spend time on other links after the first one drains.
+    let poll_ms = if first_sync.is_some() { 50 } else { 200 };
     loop {
         if halted(shutdown) || shared.error.lock().await.is_some() {
             return true;
         }
-        let now = forthebirds_store::now();
-        let wake = clock.real(sim_ms);
-        if now >= wake {
+        if let Some(replicator) = first_sync
+            && replicator.caught_up_ms().await.is_some()
+        {
             return false;
         }
-        let delay = Duration::from_millis(wake.saturating_sub(now).min(200));
+        let Some(delay) = wait_delay(forthebirds_store::now(), wake, poll_ms) else {
+            return false;
+        };
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || halted(shutdown) {
@@ -1306,6 +1350,10 @@ async fn wait_until(
             _ = shared.error_notify.notified() => return true,
         }
     }
+}
+
+fn wait_delay(now: u64, wake: u64, poll_ms: u64) -> Option<Duration> {
+    (now < wake).then(|| Duration::from_millis((wake - now).min(poll_ms)))
 }
 
 fn halted(shutdown: &watch::Receiver<bool>) -> bool {
@@ -1321,6 +1369,13 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[test]
+    fn waiting_ends_at_the_deadline_millisecond() {
+        assert_eq!(wait_delay(999, 1_000, 50), Some(Duration::from_millis(1)));
+        assert_eq!(wait_delay(1_000, 1_000, 50), None);
+        assert_eq!(wait_delay(1_001, 1_000, 50), None);
+    }
 
     #[test]
     fn page_frame_carries_stance_records_on_the_simulated_clock() {

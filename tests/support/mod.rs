@@ -3,7 +3,7 @@
 //! `/apply-template` names the context's `you`, message count and date.
 //! `/tokenize` encodes them as three token ids. `/completion` reads them
 //! back: fetch, argue, then a vote for that peer's colour.
-//! Nothing is stored between calls.
+//! The model keeps no conversation state between calls.
 //!
 //! [`spawn`] is the peer test: `p00` votes blue and `p01` votes red, so two
 //! peers tie. [`spawn_lab`] is the three-peer lab: `p00` and `p01` vote blue,
@@ -14,28 +14,50 @@ use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
 use serde_json::{Value, json};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// Blue for `p00` and any other id. Red for `p01`.
 pub fn colour_for(peer_id: &str) -> &'static str {
     if peer_id == "p01" { "red" } else { "blue" }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Palette {
     lab: bool,
+    first_contexts: Option<UnboundedSender<Value>>,
 }
 
 // The peer tests call this. The lab test crate compiles this module too and does not.
 #[allow(dead_code)]
 pub async fn spawn() -> (String, tokio::task::JoinHandle<()>) {
-    serve(Palette { lab: false }).await
+    let (url, task, _) = spawn_recording().await;
+    (url, task)
+}
+
+/// Observe the first inference context of each activation.
+pub async fn spawn_recording() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    UnboundedReceiver<Value>,
+) {
+    let (send, receive) = mpsc::unbounded_channel();
+    let (url, task) = serve(Palette {
+        lab: false,
+        first_contexts: Some(send),
+    })
+    .await;
+    (url, task, receive)
 }
 
 /// Blue for `p00` and `p01`, red for `p02`. The argument text names the peer.
 // The lab test calls this. The peer test crate compiles this module too and does not.
 #[allow(dead_code)]
 pub async fn spawn_lab() -> (String, tokio::task::JoinHandle<()>) {
-    serve(Palette { lab: true }).await
+    serve(Palette {
+        lab: true,
+        first_contexts: None,
+    })
+    .await
 }
 
 async fn serve(palette: Palette) -> (String, tokio::task::JoinHandle<()>) {
@@ -52,13 +74,20 @@ async fn serve(palette: Palette) -> (String, tokio::task::JoinHandle<()>) {
     (url, task)
 }
 
-async fn apply_template(Json(request): Json<Value>) -> Json<Value> {
+async fn apply_template(State(palette): State<Palette>, Json(request): Json<Value>) -> Json<Value> {
     let messages = request["messages"].as_array().expect("messages");
     let content = messages[1]["content"].as_str().expect("user content");
     let context: Value = serde_json::from_str(content).expect("context json");
     let you = context["you"].as_str().expect("you");
     let date = context["date"].as_str().expect("date");
-    Json(json!({"prompt": format!("{you} {} {date}", messages.len())}))
+    let prompt = format!("{you} {} {date}", messages.len());
+    if messages.len() == 2
+        && let Some(send) = palette.first_contexts
+    {
+        // Observing the fake model is optional, and the receiver may have stopped.
+        let _ = send.send(context);
+    }
+    Json(json!({"prompt": prompt}))
 }
 
 async fn tokenize(Json(request): Json<Value>) -> Json<Value> {
